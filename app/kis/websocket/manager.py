@@ -1,0 +1,578 @@
+"""
+KIS WebSocket Manager
+
+웹소켓 생명주기 관리
+"""
+
+import asyncio
+import logging
+from typing import Optional, Dict, List
+from enum import Enum
+
+from app.models.websocket import StartCommand, StopCommand, TokenInfo, StartConfig
+from app.kis.websocket.price_client import PriceWebSocketClient
+from app.kis.websocket.account_client import AccountWebSocketClient
+from app.kis.websocket.exceptions import (
+    WebSocketConnectionError,
+    WebSocketAuthError,
+    WebSocketError,
+)
+from app.kis.websocket.error_stats import get_error_stats
+from app.kis.websocket.redis_manager import get_redis_manager
+
+logger = logging.getLogger(__name__)
+
+
+class WebSocketStatus(str, Enum):
+    """웹소켓 상태"""
+
+    IDLE = "IDLE"  # 대기 중
+    STARTING = "STARTING"  # 시작 중
+    RUNNING = "RUNNING"  # 실행 중
+    STOPPING = "STOPPING"  # 종료 중
+    ERROR = "ERROR"  # 에러 상태
+
+
+class WebSocketManager:
+    """KIS 웹소켓 매니저"""
+
+    def __init__(self):
+        self._status = WebSocketStatus.IDLE
+        self._price_client: Optional[PriceWebSocketClient] = None
+        self._account_clients: Dict[str, AccountWebSocketClient] = {}
+        self._tasks: List[asyncio.Task] = []
+        self._error_stats = get_error_stats()
+        self._failed_accounts: List[str] = []  # 시작 실패한 계좌들
+        self._redis_manager = get_redis_manager()
+
+    @property
+    def status(self) -> WebSocketStatus:
+        """현재 상태"""
+        return self._status
+
+    @property
+    def is_running(self) -> bool:
+        """실행 중인지 확인"""
+        return self._status == WebSocketStatus.RUNNING
+
+    async def start_all(self, command: StartCommand) -> bool:
+        """
+        모든 웹소켓 시작
+        
+        PRICE와 ACCOUNT는 독립적으로 관리됩니다:
+        - PRICE 웹소켓: 1개만 존재 (이미 실행 중이면 스킵)
+        - ACCOUNT 웹소켓: 여러 개 가능 (기존 계좌에 새로운 계좌 추가 가능)
+
+        Args:
+            command: START 명령
+
+        Returns:
+            성공 여부 (부분 성공도 True)
+        """
+        try:
+            # 상태 업데이트 (IDLE이면 STARTING으로, RUNNING이면 그대로 유지)
+            if self._status == WebSocketStatus.IDLE:
+                self._status = WebSocketStatus.STARTING
+            
+            logger.info(f"Starting WebSocket connections... target={command.target}")
+
+            config = command.config
+            tokens = command.tokens
+            partial_failure = False
+            price_websocket_started = False
+            account_websocket_skipped_mock = False  # mock 모드에서 의도적으로 건너뛴 경우
+            new_accounts_added = 0
+
+            # 가격 웹소켓 시작 (PRICE 타겟일 때만)
+            if command.target in ("ALL", "PRICE"):
+                # 이미 실행 중이면 스킵
+                if self._price_client and self._price_client.is_connected:
+                    logger.info("Price websocket is already running, skipping")
+                elif not tokens:
+                    logger.error("tokens is required for PRICE target")
+                    if self._status == WebSocketStatus.STARTING:
+                        self._status = WebSocketStatus.ERROR
+                    return False
+                elif config.stocks:
+                    try:
+                        await self._start_price_websocket(tokens, config)
+                        price_websocket_started = True
+                    except WebSocketAuthError as e:
+                        logger.error(f"Price websocket auth error: {e}")
+                        self._error_stats.record_error(e)
+                        if self._status == WebSocketStatus.STARTING:
+                            self._status = WebSocketStatus.ERROR
+                        return False  # 인증 에러는 전체 실패
+                    except Exception as e:
+                        logger.error(f"Failed to start price websocket: {e}", exc_info=True)
+                        self._error_stats.record_error(e)
+                        partial_failure = True
+                else:
+                    logger.warning("No stocks specified for price websocket")
+
+            # 계좌 웹소켓들 시작 (ACCOUNT 타겟일 때만)
+            if command.target in ("ALL", "ACCOUNT"):
+                if config.is_mock:
+                    # mock 모드에서는 실제 계좌 웹소켓 연결을 건너뜀 (의도된 동작)
+                    logger.info("Skipping account websocket connection in mock mode")
+                    account_websocket_skipped_mock = True
+                elif config.users:
+                    # users가 있는 경우 (각 user의 account에서 ws_token과 app_key 사용)
+                    try:
+                        new_accounts = await self._start_account_websockets_from_users(config)
+                        new_accounts_added = new_accounts
+                    except Exception as e:
+                        logger.error(f"Failed to start some account websockets: {e}", exc_info=True)
+                        self._error_stats.record_error(e)
+                        partial_failure = True
+                # elif config.accounts:
+                #     # 기존 방식: accounts가 있고 tokens가 있는 경우
+                #     if not tokens:
+                #         logger.error("tokens is required when using accounts (not users)")
+                #         partial_failure = True
+                #     else:
+                #         try:
+                #             new_accounts = await self._start_account_websockets(tokens, config)
+                #             new_accounts_added = new_accounts
+                #         except Exception as e:
+                #             logger.error(f"Failed to start some account websockets: {e}", exc_info=True)
+                #             self._error_stats.record_error(e)
+                #             partial_failure = True
+                else:
+                    logger.warning("No accounts or users specified for account websockets")
+
+            # 성공 조건:
+            # 1. 가격 웹소켓이 시작되었거나 (이미 실행 중이었거나)
+            # 2. 계좌 웹소켓이 시작되었거나 (새로 추가되었거나)
+            # 3. mock 모드에서 계좌 웹소켓을 의도적으로 건너뛴 경우
+            success = False
+            if command.target in ("ALL", "PRICE"):
+                if price_websocket_started or (self._price_client and self._price_client.is_connected):
+                    success = True
+            if command.target in ("ALL", "ACCOUNT"):
+                if new_accounts_added > 0 or account_websocket_skipped_mock or len(self._account_clients) > 0:
+                    success = True
+            
+            if success:
+                self._status = WebSocketStatus.RUNNING
+                if partial_failure:
+                    logger.warning(
+                        f"WebSocket connections started with partial failures. "
+                        f"Failed accounts: {self._failed_accounts}"
+                    )
+                else:
+                    if account_websocket_skipped_mock:
+                        logger.info("WebSocket connections started successfully (account websocket skipped in mock mode)")
+                    elif new_accounts_added > 0:
+                        logger.info(f"Successfully added {new_accounts_added} new account websocket(s)")
+                    else:
+                        logger.info("WebSocket connections started successfully")
+                return True
+            else:
+                # 타겟별로 실패 처리
+                if command.target == "PRICE" and not price_websocket_started:
+                    if self._status == WebSocketStatus.STARTING:
+                        self._status = WebSocketStatus.ERROR
+                    logger.error("Price websocket failed to start")
+                    return False
+                elif command.target == "ACCOUNT" and new_accounts_added == 0 and not account_websocket_skipped_mock:
+                    logger.warning("No account websockets were started")
+                    return False
+                else:
+                    # ALL 타겟인 경우 부분 실패도 허용
+                    self._status = WebSocketStatus.RUNNING
+                    return True
+
+        except Exception as e:
+            logger.error(f"Failed to start WebSocket connections: {e}", exc_info=True)
+            self._error_stats.record_error(e)
+            if self._status == WebSocketStatus.STARTING:
+                self._status = WebSocketStatus.ERROR
+            return False
+
+    async def stop_all(self, command: Optional[StopCommand] = None) -> bool:
+        """
+        모든 웹소켓 종료
+
+        Args:
+            command: STOP 명령 (선택)
+
+        Returns:
+            성공 여부
+        """
+        if self._status == WebSocketStatus.IDLE:
+            logger.warning("WebSocket is already stopped")
+            return True
+
+        try:
+            self._status = WebSocketStatus.STOPPING
+            target = command.target if command else "ALL"
+            logger.info(f"Stopping WebSocket connections... target={target}")
+
+            stop_errors = []
+
+            # 가격 웹소켓 종료
+            if target in ("ALL", "PRICE"):
+                try:
+                    await self._stop_price_websocket()
+                except Exception as e:
+                    logger.error(f"Error stopping price websocket: {e}", exc_info=True)
+                    self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "price"})
+                    stop_errors.append(e)
+
+            # 계좌 웹소켓들 종료
+            if target in ("ALL", "ACCOUNT"):
+                try:
+                    await self._stop_account_websockets(target)
+                except Exception as e:
+                    logger.error(f"Error stopping account websockets: {e}", exc_info=True)
+                    self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "account"})
+                    stop_errors.append(e)
+
+            # 모든 태스크 취소
+            for task in self._tasks:
+                if not task.done():
+                    task.cancel()
+
+            # 태스크 완료 대기 (에러 무시)
+            if self._tasks:
+                results = await asyncio.gather(*self._tasks, return_exceptions=True)
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.warning(f"Task {i} ended with error: {result}")
+
+            self._tasks.clear()
+            self._status = WebSocketStatus.IDLE
+
+            if stop_errors:
+                logger.warning(
+                    f"WebSocket connections stopped with some errors: {len(stop_errors)} errors"
+                )
+            else:
+                logger.info("All WebSocket connections stopped successfully")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to stop WebSocket connections: {e}", exc_info=True)
+            self._error_stats.record_error(e)
+            self._status = WebSocketStatus.ERROR
+            return False
+
+    async def _start_price_websocket(self, tokens: TokenInfo, config: StartConfig) -> None:
+        """가격 웹소켓 시작"""
+        try:
+            logger.info(f"Starting price websocket for {len(config.stocks)} stocks")
+            self._price_client = PriceWebSocketClient(
+                ws_token=tokens.ws_token,
+                appkey=config.appkey,
+                env_dv=config.env_dv,
+                stocks=config.stocks,
+            )
+
+            task = asyncio.create_task(self._price_client.connect_and_run())
+            self._tasks.append(task)
+            logger.info("Price websocket started")
+
+        except WebSocketAuthError:
+            # 인증 에러는 그대로 전파 (전체 실패 처리)
+            raise
+        except Exception as e:
+            logger.error(f"Failed to start price websocket: {e}", exc_info=True)
+            self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "price"})
+            raise
+
+    # async def _start_account_websockets(self, tokens: TokenInfo, config: StartConfig) -> int:
+    #     """
+    #     계좌 웹소켓들 시작 (기존 방식: tokens 사용)
+        
+    #     Returns:
+    #         새로 추가된 계좌 웹소켓 수
+    #     """
+    #     try:
+    #         logger.info(f"Starting account websockets for {len(config.accounts)} accounts")
+    #         success_count = 0
+    #         failure_count = 0
+    #         skipped_count = 0
+
+    #         for account in config.accounts:
+    #             # 이미 실행 중인 계좌는 스킵
+    #             if account.account_no in self._account_clients:
+    #                 existing_client = self._account_clients[account.account_no]
+    #                 if existing_client.is_connected:
+    #                     logger.info(f"Account websocket already running: {account.account_no}, skipping")
+    #                     skipped_count += 1
+    #                     continue
+    #                 else:
+    #                     # 연결이 끊어진 경우 제거하고 재시작
+    #                     logger.info(f"Account websocket disconnected: {account.account_no}, restarting")
+    #                     del self._account_clients[account.account_no]
+                
+    #             try:
+    #                 logger.info(f"Starting account websocket: {account.account_no}")
+    #                 account_client = AccountWebSocketClient(
+    #                     ws_token=tokens.ws_token,
+    #                     appkey=config.appkey,
+    #                     env_dv=config.env_dv,
+    #                     is_mock=config.is_mock,
+    #                     account_no=account.account_no,
+    #                     account_product_code=account.account_product_code,
+    #                     access_token=tokens.access_token,
+    #                 )
+
+    #                 task = asyncio.create_task(account_client.connect_and_run())
+    #                 self._tasks.append(task)
+    #                 self._account_clients[account.account_no] = account_client
+    #                 success_count += 1
+    #                 logger.info(f"Account websocket started: {account.account_no}")
+
+    #             except WebSocketAuthError as e:
+    #                 # 인증 에러는 해당 계좌만 실패 처리
+    #                 logger.error(
+    #                     f"Account websocket auth error for {account.account_no}: {e}"
+    #                 )
+    #                 self._error_stats.record_error(e, error_type=None, error_code=None, details={"account_no": account.account_no})
+    #                 self._failed_accounts.append(account.account_no)
+    #                 failure_count += 1
+    #             except Exception as e:
+    #                 logger.error(
+    #                     f"Failed to start account websocket {account.account_no}: {e}",
+    #                     exc_info=True
+    #                 )
+    #                 self._error_stats.record_error(
+    #                     e,
+    #                     error_type=None,
+    #                     error_code=None,
+    #                     details={"account_no": account.account_no, "websocket_type": "account"}
+    #                 )
+    #                 self._failed_accounts.append(account.account_no)
+    #                 failure_count += 1
+
+    #         logger.info(
+    #             f"Account websockets: {success_count} new, {skipped_count} skipped, {failure_count} failed"
+    #         )
+
+    #         if failure_count > 0:
+    #             logger.warning(f"Failed to start {failure_count} account websockets")
+
+    #         return success_count
+
+    #     except Exception as e:
+    #         logger.error(f"Failed to start account websockets: {e}", exc_info=True)
+    #         self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "account"})
+    #         raise
+
+    async def _start_account_websockets_from_users(self, config: StartConfig) -> int:
+        """
+        계좌 웹소켓들 시작 (users 방식: 각 user의 account에서 ws_token과 app_key 사용)
+        
+        Returns:
+            새로 추가된 계좌 웹소켓 수
+        """
+        try:
+            logger.info(f"Starting account websockets for {len(config.users)} users")
+            success_count = 0
+            failure_count = 0
+            skipped_count = 0
+
+            for user in config.users:
+                account = user.account
+                
+                # 이미 실행 중인 계좌는 스킵
+                if account.account_no in self._account_clients:
+                    existing_client = self._account_clients[account.account_no]
+                    if existing_client.is_connected:
+                        logger.info(f"Account websocket already running: {account.account_no} (user_id: {user.user_id}), skipping")
+                        skipped_count += 1
+                        continue
+                    else:
+                        # 연결이 끊어진 경우 제거하고 재시작
+                        logger.info(f"Account websocket disconnected: {account.account_no} (user_id: {user.user_id}), restarting")
+                        del self._account_clients[account.account_no]
+                
+                try:
+                    # user의 strategies에서 user_strategy_id 리스트 추출
+                    user_strategy_ids = [s.get("user_strategy_id") for s in user.strategies if s.get("user_strategy_id")]
+                    
+                    logger.info(
+                        f"Starting account websocket: {account.account_no} "
+                        f"(user_id: {user.user_id}, hts_id: {account.hts_id})"
+                    )
+                    account_client = AccountWebSocketClient(
+                        ws_token=account.ws_token,
+                        appkey=account.app_key,
+                        env_dv=config.env_dv,
+                        is_mock=config.is_mock,
+                        account_no=account.account_no,
+                        account_product_code=account.account_product_code,
+                        access_token=account.access_token,
+                        user_id=user.user_id,
+                        user_strategy_ids=user_strategy_ids,
+                        hts_id=account.hts_id,  # Pydantic 모델이므로 직접 접근
+                    )
+
+                    task = asyncio.create_task(account_client.connect_and_run())
+                    self._tasks.append(task)
+                    self._account_clients[account.account_no] = account_client
+                    success_count += 1
+                    logger.info(f"Account websocket started: {account.account_no} (user_id: {user.user_id})")
+
+                except WebSocketAuthError as e:
+                    # 인증 에러는 해당 계좌만 실패 처리
+                    logger.error(
+                        f"Account websocket auth error for {account.account_no} (user_id: {user.user_id}): {e}"
+                    )
+                    self._error_stats.record_error(e, error_type=None, error_code=None, details={"account_no": account.account_no, "user_id": user.user_id})
+                    self._failed_accounts.append(account.account_no)
+                    failure_count += 1
+                except Exception as e:
+                    logger.error(
+                        f"Failed to start account websocket {account.account_no} (user_id: {user.user_id}): {e}",
+                        exc_info=True
+                    )
+                    self._error_stats.record_error(
+                        e,
+                        error_type=None,
+                        error_code=None,
+                        details={"account_no": account.account_no, "user_id": user.user_id, "websocket_type": "account"}
+                    )
+                    self._failed_accounts.append(account.account_no)
+                    failure_count += 1
+
+            logger.info(
+                f"Account websockets: {success_count} new, {skipped_count} skipped, {failure_count} failed"
+            )
+
+            if failure_count > 0:
+                logger.warning(f"Failed to start {failure_count} account websockets")
+
+            return success_count
+
+        except Exception as e:
+            logger.error(f"Failed to start account websockets: {e}", exc_info=True)
+            self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "account"})
+            raise
+
+    async def _stop_price_websocket(self) -> None:
+        """가격 웹소켓 종료"""
+        if self._price_client:
+            try:
+                await self._price_client.disconnect()
+                logger.info("Price websocket stopped")
+            except Exception as e:
+                logger.error(f"Error stopping price websocket: {e}", exc_info=True)
+            finally:
+                self._price_client = None
+
+    async def _stop_account_websockets(self, target: str) -> None:
+        """계좌 웹소켓들 종료"""
+        if target == "ALL":
+            accounts_to_stop = list(self._account_clients.keys())
+        else:
+            # 특정 계좌만 종료
+            accounts_to_stop = [target] if target in self._account_clients else []
+
+        for account_no in accounts_to_stop:
+            client = self._account_clients.get(account_no)
+            if client:
+                try:
+                    await client.disconnect()
+                    logger.info(f"Account websocket stopped: {account_no}")
+                except Exception as e:
+                    logger.error(f"Error stopping account websocket {account_no}: {e}", exc_info=True)
+                finally:
+                    del self._account_clients[account_no]
+
+    async def update_price_stocks(self, new_stocks: List[str]) -> bool:
+        """
+        가격 웹소켓 종목 업데이트
+        
+        Args:
+            new_stocks: 새로운 종목 리스트
+            
+        Returns:
+            성공 여부
+        """
+        if not self._price_client:
+            logger.warning("Price websocket is not running, cannot update stocks")
+            return False
+        
+        if not self._price_client.is_connected:
+            logger.warning("Price websocket is not connected, cannot update stocks")
+            return False
+        
+        try:
+            await self._price_client.update_stocks(new_stocks)
+            logger.info(f"Price websocket stocks updated: {len(new_stocks)} stocks")
+            
+            # Redis에 업데이트된 종목 정보 저장
+            if self._price_client.stocks:
+                self._redis_manager.save_price_connection(
+                    ws_token=self._price_client.ws_token,
+                    appkey=self._price_client.appkey,
+                    env_dv=self._price_client.env_dv,
+                    stocks=self._price_client.stocks,
+                    status="connected",
+                    reconnect_attempts=self._price_client.reconnect_attempts,
+                )
+            
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update price websocket stocks: {e}", exc_info=True)
+            self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "price"})
+            return False
+
+    def get_status(self) -> Dict:
+        """상태 정보 반환"""
+        # 가격 웹소켓 상태
+        price_status = "stopped"
+        price_redis_info = None
+        if self._price_client:
+            price_status = "connected" if self._price_client.is_connected else "disconnected"
+            if self._price_client.reconnect_attempts > 0:
+                price_status = f"{price_status} (reconnecting: {self._price_client.reconnect_attempts})"
+        else:
+            # Redis에서 확인
+            price_redis_info = self._redis_manager.get_price_connection()
+            if price_redis_info:
+                price_status = f"redis_found ({price_redis_info.get('status', 'unknown')})"
+
+        # 계좌 웹소켓 상태
+        account_statuses = {}
+        account_redis_info = {}
+        for account_no, client in self._account_clients.items():
+            status = "connected" if client.is_connected else "disconnected"
+            if client.reconnect_attempts > 0:
+                status = f"{status} (reconnecting: {client.reconnect_attempts})"
+            account_statuses[account_no] = status
+
+        # Redis에서 추가 계좌 정보 확인
+        all_redis_accounts = self._redis_manager.get_all_account_connections()
+        for account_no, redis_data in all_redis_accounts.items():
+            if account_no not in account_statuses:
+                account_statuses[account_no] = f"redis_found ({redis_data.get('status', 'unknown')})"
+                account_redis_info[account_no] = redis_data
+
+        return {
+            "status": self._status.value,
+            "price_websocket": price_status,
+            "price_redis_info": price_redis_info,
+            "account_websockets": account_statuses,
+            "account_redis_info": account_redis_info,
+            "total_accounts": len(self._account_clients),
+            "failed_accounts": self._failed_accounts,
+            "error_statistics": self._error_stats.get_statistics(),
+            "redis_connected": self._redis_manager.is_connected(),
+        }
+
+
+# 싱글톤 인스턴스
+_manager_instance: Optional[WebSocketManager] = None
+
+
+def get_websocket_manager() -> WebSocketManager:
+    """WebSocket Manager 싱글톤 인스턴스 반환"""
+    global _manager_instance
+    if _manager_instance is None:
+        _manager_instance = WebSocketManager()
+    return _manager_instance

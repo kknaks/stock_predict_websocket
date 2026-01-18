@@ -1,0 +1,429 @@
+"""
+시그널 실행 모듈
+
+실시간 가격 데이터를 받아 매수/매도 시그널을 생성하고 실행합니다.
+"""
+
+import json
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, Optional
+
+from app.service.signal_generator import get_signal_generator
+from app.service.calculate_slippage import SignalResult
+from app.service.strategy_table import get_strategy_table
+from app.kis.websocket.redis_manager import get_redis_manager
+from app.kis.api.order_api import get_order_api
+
+logger = logging.getLogger(__name__)
+
+
+class SignalExecutor:
+    """시그널 생성 및 실행 클래스"""
+
+    def __init__(self):
+        self._signal_generator = get_signal_generator()
+        self._strategy_table = get_strategy_table()
+        self._redis_manager = get_redis_manager()
+        self._order_api = get_order_api()
+
+        # 시그널 체크 최적화
+        self._last_signal_check: Dict[str, datetime] = {}  # {종목코드: 마지막체크시간}
+        self._signal_check_interval = 0.5  # 같은 종목 체크 간격 (초)
+        self._generated_signals: set = set()  # 이미 생성된 시그널 (전략ID_종목코드)
+        self._last_prices: Dict[str, float] = {}  # {종목코드: 마지막가격} - 가격 변동 없으면 스킵
+
+    async def check_and_generate_buy_signal(self, price_data: dict) -> None:
+        """
+        매수 시그널 생성 체크 (시가 매수)
+
+        조건:
+        - strategy_id == 1인 전략만
+        - 시가 감지 (STCK_OPRC > 0)
+        - 현재가와 시가 차이 1% 미만
+        - 장 시작 후 10분 이내
+        - 중복 방지
+
+        최적화:
+        1. 쓰로틀링: 같은 종목은 0.5초 간격으로만 체크
+        2. 가격 변동 체크: 가격이 변하지 않으면 스킵
+        3. 중복 방지: 이미 BUY 시그널 생성된 전략-종목은 스킵
+        """
+        try:
+            stock_code = price_data.get('MKSC_SHRN_ISCD', '')
+            if not stock_code:
+                return
+
+            # 시가 확인
+            opening_price = self._signal_generator.slippage_calculator._parse_float(price_data.get('STCK_OPRC', 0))
+            current_price = self._signal_generator.slippage_calculator._parse_float(price_data.get('STCK_PRPR', 0))
+            opening_hour = price_data.get('OPRC_HOUR', '')
+
+            # 시가가 없으면 스킵
+            if opening_price <= 0:
+                return
+
+            if current_price <= 0:
+                return
+
+            # 현재가와 시가 차이 계산 (%)
+            price_diff_pct = abs((current_price - opening_price) / opening_price * 100) if opening_price > 0 else 999
+
+            # 1% 미만 차이만 허용
+            if price_diff_pct >= 1.0:
+                logger.debug(
+                    f"시가 매수 조건 불만족 (가격 차이 초과): "
+                    f"종목={stock_code}, "
+                    f"시가={opening_price:,.0f}, "
+                    f"현재가={current_price:,.0f}, "
+                    f"차이={price_diff_pct:.2f}%"
+                )
+                return
+
+            # 장 시작 후 10분 이내 확인
+            if opening_hour:
+                try:
+                    # OPRC_HOUR 형식: "HHMMSS" (예: "090000")
+                    if len(opening_hour) >= 6:
+                        hour_str = opening_hour[:2]
+                        min_str = opening_hour[2:4]
+                        sec_str = opening_hour[4:6]
+                        
+                        today = datetime.now().date()
+                        opening_time = datetime.strptime(
+                            f"{today} {hour_str}:{min_str}:{sec_str}",
+                            "%Y-%m-%d %H:%M:%S"
+                        )
+                        current_time = datetime.now()
+                        time_diff = current_time - opening_time
+
+                        # 10분 초과 시 스킵
+                        if time_diff > timedelta(minutes=10):
+                            logger.debug(
+                                f"시가 매수 조건 불만족 (10분 초과): "
+                                f"종목={stock_code}, "
+                                f"시가시간={opening_hour}, "
+                                f"경과시간={time_diff.total_seconds() / 60:.1f}분"
+                            )
+                            return
+                except Exception as e:
+                    logger.warning(f"시가시간 파싱 오류: {e}, opening_hour={opening_hour}")
+
+            # 최적화 1: 가격 변동 없으면 스킵
+            last_price = self._last_prices.get(stock_code, 0)
+            if current_price == last_price:
+                return
+            self._last_prices[stock_code] = current_price
+
+            # 최적화 2: 쓰로틀링 - 같은 종목 0.5초 내 재체크 방지
+            now = datetime.now()
+            last_check = self._last_signal_check.get(stock_code)
+            if last_check:
+                elapsed = (now - last_check).total_seconds()
+                if elapsed < self._signal_check_interval:
+                    return
+            self._last_signal_check[stock_code] = now
+
+            # Redis에서 호가 데이터 가져오기
+            asking_price_data = await self._get_asking_price_from_redis(stock_code)
+            if not asking_price_data:
+                logger.debug(f"호가 데이터 없음: {stock_code}")
+                return
+
+            # 모든 전략에 대해 시그널 체크
+            strategy_ids = self._strategy_table.get_all_strategies()
+
+            for user_strategy_id in strategy_ids:
+                # strategy_id == 1만 필터링
+                strategy_info = self._strategy_table.get_strategy_info(user_strategy_id)
+                if not strategy_info or strategy_info.strategy_id != 1:
+                    continue
+
+                # 최적화 3: 이미 BUY 시그널 생성된 조합은 스킵
+                signal_key = f"{user_strategy_id}_{stock_code}_BUY"
+                if signal_key in self._generated_signals:
+                    continue
+
+                # 해당 전략의 종목 목표가 확인 (예측 데이터가 있어야 함)
+                target = self._strategy_table.get_target_for_comparison(
+                    user_strategy_id, stock_code
+                )
+
+                if target is None:
+                    logger.debug(
+                        f"시가 매수 스킵 (목표가 없음): "
+                        f"전략={user_strategy_id}, "
+                        f"종목={stock_code}"
+                    )
+                    continue
+
+                # 매수 시그널 생성
+                signal = self._signal_generator.generate_buy_signal(
+                    stock_code=stock_code,
+                    price_data=price_data,
+                    asking_price_data=asking_price_data,
+                    order_quantity=target.target_quantity
+                )
+
+                if signal:
+                    # BUY 시그널은 한 번만 생성 (중복 방지)
+                    self._generated_signals.add(signal_key)
+                    await self.handle_signal(user_strategy_id, signal)
+
+        except Exception as e:
+            logger.error(f"매수 시그널 체크 오류: {e}", exc_info=True)
+
+    async def check_and_generate_sell_signal(self, price_data: dict) -> None:
+        """
+        매도 시그널 생성 체크 (최적화 버전)
+
+        최적화:
+        1. 쓰로틀링: 같은 종목은 0.5초 간격으로만 체크
+        2. 가격 변동 체크: 가격이 변하지 않으면 스킵
+        3. 중복 방지: 이미 SELL 시그널 생성된 전략-종목은 스킵
+        """
+        try:
+            stock_code = price_data.get('MKSC_SHRN_ISCD', '')
+            if not stock_code:
+                return
+
+            current_price = float(price_data.get('STCK_PRPR', 0))
+            if current_price <= 0:
+                return
+
+            # 최적화 1: 가격 변동 없으면 스킵
+            last_price = self._last_prices.get(stock_code, 0)
+            if current_price == last_price:
+                return
+            self._last_prices[stock_code] = current_price
+
+            # 최적화 2: 쓰로틀링 - 같은 종목 0.5초 내 재체크 방지
+            now = datetime.now()
+            last_check = self._last_signal_check.get(stock_code)
+            if last_check:
+                elapsed = (now - last_check).total_seconds()
+                if elapsed < self._signal_check_interval:
+                    return
+            self._last_signal_check[stock_code] = now
+
+            # Redis에서 호가 데이터 가져오기
+            asking_price_data = await self._get_asking_price_from_redis(stock_code)
+            if not asking_price_data:
+                logger.debug(f"호가 데이터 없음: {stock_code}")
+                return
+
+            # 모든 전략에 대해 시그널 체크
+            strategy_ids = self._strategy_table.get_all_strategies()
+
+            for user_strategy_id in strategy_ids:
+                # 최적화 3: 이미 SELL 시그널 생성된 조합은 스킵
+                signal_key = f"{user_strategy_id}_{stock_code}"
+                if signal_key in self._generated_signals:
+                    continue
+
+                target = self._strategy_table.get_target_for_comparison(
+                    user_strategy_id, stock_code
+                )
+
+                if target is None:
+                    continue
+
+                # 매도 시그널 생성
+                signal = self._signal_generator.generate_sell_signal(
+                    stock_code=stock_code,
+                    price_data=price_data,
+                    asking_price_data=asking_price_data,
+                    target_price=target.sell_price,
+                    stop_loss_price=target.stop_loss_price,
+                    order_quantity=target.target_quantity  # 기본값, 실제로는 보유 수량 참조
+                )
+
+                if signal:
+                    if signal.signal_type == "SELL":
+                        # SELL 시그널은 한 번만 생성 (중복 방지)
+                        self._generated_signals.add(signal_key)
+                        await self.handle_signal(user_strategy_id, signal)
+                    elif signal.signal_type == "HOLD":
+                        # HOLD 경고는 계속 허용 (단, 쓰로틀링 적용됨)
+                        await self.handle_signal(user_strategy_id, signal)
+
+        except Exception as e:
+            logger.error(f"매도 시그널 체크 오류: {e}", exc_info=True)
+
+    async def handle_signal(self, user_strategy_id: int, signal: SignalResult) -> None:
+        """
+        생성된 시그널 처리
+
+        Args:
+            user_strategy_id: 전략 ID
+            signal: 생성된 시그널
+        """
+        try:
+            if signal.signal_type == "BUY":
+                # 매수 시그널 로깅
+                logger.warning(
+                    f"🟢 매수 시그널 생성! "
+                    f"[전략={user_strategy_id}] "
+                    f"종목={signal.stock_code}, "
+                    f"수량={signal.target_quantity}, "
+                    f"현재가={signal.current_price:,.0f}, "
+                    f"추천가={signal.recommended_order_price:,.0f}, "
+                    f"주문유형={signal.recommended_order_type.value}, "
+                    f"예상슬리피지={signal.expected_slippage_pct:.3f}%, "
+                    f"긴급도={signal.urgency}, "
+                    f"사유={signal.reason}"
+                )
+                
+                # 주문 처리 (mock 여부에 따라 자동 분기)
+                order_result = await self._order_api.process_buy_order(
+                    user_strategy_id=user_strategy_id,
+                    signal=signal,
+                    order_quantity=signal.target_quantity  # 기본값
+                )
+                
+                if order_result.get("success"):
+                    logger.info(
+                        f"✅ 매수 주문 처리 완료: "
+                        f"[전략={user_strategy_id}] "
+                        f"종목={signal.stock_code}, "
+                        f"결과={order_result}"
+                    )
+                else:
+                    logger.error(
+                        f"❌ 매수 주문 처리 실패: "
+                        f"[전략={user_strategy_id}] "
+                        f"종목={signal.stock_code}, "
+                        f"오류={order_result.get('error', 'N/A')}"
+                    )
+                
+                # Redis에 시그널 저장 (백업용)
+                await self._save_signal_to_redis(user_strategy_id, signal)
+
+            elif signal.signal_type == "SELL":
+                # 매도 시그널 로깅
+                logger.warning(
+                    f"🔴 매도 시그널 생성! "
+                    f"[전략={user_strategy_id}] "
+                    f"종목={signal.stock_code}, "
+                    f"수량={signal.target_quantity}, "
+                    f"현재가={signal.current_price:,.0f}, "
+                    f"추천가={signal.recommended_order_price:,.0f}, "
+                    f"주문유형={signal.recommended_order_type.value}, "
+                    f"예상슬리피지={signal.expected_slippage_pct:.3f}%, "
+                    f"긴급도={signal.urgency}, "
+                    f"사유={signal.reason}"
+                )
+                
+                # 주문 처리 (mock 여부에 따라 자동 분기)
+                order_result = await self._order_api.process_sell_order(
+                    user_strategy_id=user_strategy_id,
+                    signal=signal,
+                    order_quantity=signal.target_quantity  # 기본값, 실제로는 보유 수량 참조 필요
+                )
+                
+                if order_result.get("success"):
+                    logger.info(
+                        f"✅ 매도 주문 처리 완료: "
+                        f"[전략={user_strategy_id}] "
+                        f"종목={signal.stock_code}, "
+                        f"결과={order_result}"
+                    )
+                else:
+                    logger.error(
+                        f"❌ 매도 주문 처리 실패: "
+                        f"[전략={user_strategy_id}] "
+                        f"종목={signal.stock_code}, "
+                        f"오류={order_result.get('error', 'N/A')}"
+                    )
+                
+                # Redis에 시그널 저장 (백업용)
+                await self._save_signal_to_redis(user_strategy_id, signal)
+
+            elif signal.signal_type == "HOLD":
+                # 손절가 접근 경고 로깅
+                logger.info(
+                    f"⚠️ 손절가 접근 경고! "
+                    f"[전략={user_strategy_id}] "
+                    f"종목={signal.stock_code}, "
+                    f"현재가={signal.current_price:,.0f}, "
+                    f"손절가={signal.stop_loss_price:,.0f}, "
+                    f"사유={signal.reason}"
+                )
+
+        except Exception as e:
+            logger.error(f"시그널 처리 오류: {e}", exc_info=True)
+
+    async def _get_asking_price_from_redis(self, stock_code: str) -> Optional[dict]:
+        """Redis에서 호가 데이터 가져오기"""
+        try:
+            if not self._redis_manager._redis_client:
+                return None
+
+            redis_key = f"websocket:asking_price_data:{stock_code}"
+            data = self._redis_manager._redis_client.get(redis_key)
+
+            if data:
+                return json.loads(data)
+            return None
+        except Exception as e:
+            logger.warning(f"Redis에서 호가 데이터 조회 실패: {e}")
+            return None
+
+    async def _save_signal_to_redis(self, user_strategy_id: int, signal: SignalResult) -> None:
+        """매수/매도 시그널을 Redis에 저장"""
+        try:
+            if not self._redis_manager._redis_client:
+                logger.warning("Redis 클라이언트가 연결되지 않음")
+                return
+
+            signal_type_lower = signal.signal_type.lower()
+            redis_key = f"signal:{signal_type_lower}:{user_strategy_id}:{signal.stock_code}"
+
+            signal_data = {
+                "signal_type": signal.signal_type,
+                "stock_code": signal.stock_code,
+                "current_price": signal.current_price,
+                "target_price": signal.target_price,
+                "stop_loss_price": signal.stop_loss_price,
+                "recommended_order_price": signal.recommended_order_price,
+                "recommended_order_type": signal.recommended_order_type.value,
+                "expected_slippage_pct": signal.expected_slippage_pct,
+                "urgency": signal.urgency,
+                "reason": signal.reason,
+                "created_at": datetime.now().isoformat(),
+                "user_strategy_id": user_strategy_id
+            }
+
+            # 30분 TTL로 저장
+            self._redis_manager._redis_client.setex(
+                redis_key,
+                1800,
+                json.dumps(signal_data, ensure_ascii=False)
+            )
+
+            logger.debug(f"시그널 Redis 저장 완료: {redis_key}")
+
+        except Exception as e:
+            logger.error(f"시그널 Redis 저장 실패: {e}", exc_info=True)
+
+    def clear_generated_signal(self, user_strategy_id: int, stock_code: str) -> None:
+        """
+        생성된 시그널 초기화 (주문 체결 후 호출)
+
+        매도 주문이 체결된 후 호출하여 다음 매수-매도 사이클 허용
+        """
+        signal_key = f"{user_strategy_id}_{stock_code}"
+        self._generated_signals.discard(signal_key)
+        logger.info(f"시그널 초기화: {signal_key}")
+
+
+# 싱글톤 인스턴스
+_signal_executor_instance: Optional[SignalExecutor] = None
+
+
+def get_signal_executor() -> SignalExecutor:
+    """SignalExecutor 싱글톤 인스턴스 반환"""
+    global _signal_executor_instance
+    if _signal_executor_instance is None:
+        _signal_executor_instance = SignalExecutor()
+    return _signal_executor_instance

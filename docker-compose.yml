@@ -1,0 +1,87 @@
+name: stock-predict-engine
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: stock-predict-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - stock-predict-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  websocket-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stock-predict-websocket
+    restart: unless-stopped
+    ports:
+      - "8002:8001"
+    environment:
+      # Server
+      HOST: "0.0.0.0"
+      PORT: 8002
+
+      # Kafka (stock-predict-network의 Redpanda 사용)
+      KAFKA_USE_INTERNAL: "true"
+      KAFKA_BOOTSTRAP_SERVERS_INTERNAL: redpanda-0:9092,redpanda-1:9092,redpanda-2:9092
+      KAFKA_GROUP_ID: websocket-server-group
+      KAFKA_AUTO_OFFSET_RESET: latest
+      KAFKA_ENABLE_AUTO_COMMIT: "true"
+
+      # Topic
+      TOPIC_PREDICTION_RESULT: ai_prediction_result
+
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_PASSWORD: ""
+
+      # Timezone
+      TZ: Asia/Seoul
+
+      # Python
+      PYTHONUNBUFFERED: 1
+      PYTHONPATH: /app
+
+    networks:
+      - stock-predict-network
+    depends_on:
+      redis:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  redis-data:
+
+networks:
+  stock-predict-network:
+    external: true
