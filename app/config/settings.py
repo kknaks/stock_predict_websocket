@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     kafka_enable_auto_commit: bool = True
 
     topic_prediction_result: str = "ai_prediction_result"
+    topic_price: str = "stock_price"
 
     # -------------------------------------------
     # Redis

@@ -24,6 +24,8 @@ from app.kis.websocket.error_stats import get_error_stats
 from app.kis.websocket.redis_manager import get_redis_manager
 from app.service.signal_execute import get_signal_executor
 from app.utils.send_slack import send_slack
+from app.kafka.price_producer import get_price_producer
+from app.models.price import PriceMessage
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +72,9 @@ class PriceWebSocketClient:
 
         # 시그널 실행기
         self._signal_executor = get_signal_executor()
+        
+        # Kafka Producer
+        self._price_producer = get_price_producer()
 
     async def connect_and_run(self) -> None:
         """연결 및 실행"""
@@ -163,6 +168,9 @@ class PriceWebSocketClient:
             self._connection_failed = False
             self._last_ping_time = None  # 연결 시 PING 시간 초기화
             logger.info("Price websocket connected")
+
+            # Kafka Producer 시작
+            await self._price_producer.start()
 
             # Redis에 연결 정보 저장
             self._redis_manager.save_price_connection(
@@ -472,8 +480,8 @@ class PriceWebSocketClient:
                                     # 매도 시그널 생성 (목표가/손절가 도달 시)
                                     await self._signal_executor.check_and_generate_sell_signal(parsed_data)
 
-                                    # TODO: Kafka Producer로 전송
-                                    # await self._send_to_kafka(parsed_data)
+                                    # Kafka Producer로 전송
+                                    await self._send_to_kafka(parsed_data)
                             else:
                                 logger.warning(
                                     f"레코드 {i+1}/{record_count} 필드 부족: "
@@ -1102,6 +1110,14 @@ class PriceWebSocketClient:
             logger.info(f"Updated stocks: {len(old_stocks)} -> {len(new_stocks)} stocks")
         else:
             logger.warning("No new stocks to subscribe, all stocks unsubscribed")
+
+    async def _send_to_kafka(self, parsed_data: dict) -> None:
+        """파싱된 가격 데이터를 Kafka로 전송"""
+        try:
+            price_message = PriceMessage.from_parsed_data(parsed_data)
+            await self._price_producer.send_price(price_message)
+        except Exception as e:
+            logger.error(f"Failed to send price data to Kafka: {e}", exc_info=True)
 
     @property
     def reconnect_attempts(self) -> int:
