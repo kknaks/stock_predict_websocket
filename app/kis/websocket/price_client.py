@@ -23,6 +23,7 @@ from app.kis.websocket.exceptions import (
 from app.kis.websocket.error_stats import get_error_stats
 from app.kis.websocket.redis_manager import get_redis_manager
 from app.service.signal_execute import get_signal_executor
+from app.utils.send_slack import send_slack
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +248,9 @@ class PriceWebSocketClient:
                     )
 
             logger.info(f"Subscribed to {len(self.stocks)} stocks (체결가+호가): {self.stocks[:5]}...")
+
+            # Slack 알림 전송
+            await send_slack(f"[KIS WebSocket] 연결 완료 - 총 {len(self.stocks)}개 종목 구독 시작")
 
         except (WebSocketTimeoutError, WebSocketConnectionError):
             raise
@@ -1058,8 +1062,11 @@ class PriceWebSocketClient:
             # 새로 구독한 종목을 리스트에 추가 (중복 제거)
             new_stocks = [s for s in stocks if s not in self.stocks]
             self.stocks.extend(new_stocks)
-            
+
             logger.info(f"Subscribed to {len(stocks)} stocks (체결가+호가): {stocks[:5]}...")
+
+            # Slack 알림 전송
+            await send_slack(f"[KIS WebSocket] 종목 구독 변경 - 총 {len(self.stocks)}개 종목")
 
         except asyncio.TimeoutError:
             raise WebSocketTimeoutError(

@@ -432,7 +432,7 @@ class StrategyTable:
             if strategy_config.strategy_weight_type == "MARKETCAP":
                 total_market_cap = sum(p.market_cap for p in available_predictions)
             elif strategy_config.strategy_weight_type == "PRICE":
-                total_price = sum(p.price for p in available_predictions)
+                total_price = sum(p.stock_open for p in available_predictions)
             else:
                 total_market_cap = 0
                 total_price = 0
@@ -450,7 +450,7 @@ class StrategyTable:
                             weight = 1.0 / len(available_predictions)
                     elif strategy_config.strategy_weight_type == "PRICE":
                         if total_price > 0:
-                            weight = prediction.price / total_price
+                            weight = prediction.stock_open / total_price
                         else:
                             weight = 1.0 / len(available_predictions)
                     else:

@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     redis_socket_timeout: int = 5
     redis_socket_connect_timeout: int = 5
 
+    # -------------------------------------------
+    # Slack
+    # -------------------------------------------
+    slack_webhook_url: str = ""
+
     @property
     def kafka_servers(self) -> str:
         """Kafka 브로커 주소"""

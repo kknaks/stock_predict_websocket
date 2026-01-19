@@ -17,6 +17,7 @@ import httpx
 from app.kis.websocket.redis_manager import get_redis_manager
 from app.kafka.order_signal_producer import get_order_signal_producer
 from app.service.calculate_slippage import SignalResult, OrderType
+from app.utils.send_slack import send_slack
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,14 @@ class OrderAPI:
                 )
                 
                 logger.info(f"[MOCK] 매수 주문 처리 완료: {stock_code}")
-                
+
+                # Slack 알림 전송
+                await send_slack(
+                    f"[MOCK 매수 체결] {stock_code} | "
+                    f"{order_quantity}주 @ {order_price:,}원 | "
+                    f"매수 사유 : {signal.reason}"
+                )
+
                 return {
                     "success": True,
                     "is_mock": True,
@@ -449,7 +457,14 @@ class OrderAPI:
                 )
                 
                 logger.info(f"[MOCK] 매도 주문 처리 완료: {stock_code}")
-                
+
+                # Slack 알림 전송
+                await send_slack(
+                    f"[MOCK 매도 체결] {stock_code} | "
+                    f"{order_quantity}주 @ {order_price:,}원 | "
+                    f"매도 사유 : {signal.reason}"
+                )
+
                 return {
                     "success": True,
                     "is_mock": True,
