@@ -918,6 +918,7 @@ class PriceWebSocketClient:
 
         # Redis에서 연결 정보 삭제
         self._redis_manager.delete_price_connection()
+        await send_slack(f"[KIS WebSocket] 종목 구독 종료 - 총 {len(self.stocks)}개 종목")
 
     @property
     def is_connected(self) -> bool:
