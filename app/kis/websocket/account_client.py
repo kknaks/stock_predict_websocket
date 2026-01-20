@@ -83,6 +83,9 @@ class AccountWebSocketClient:
 
     async def connect_and_run(self) -> None:
         """연결 및 실행"""
+        # 시작 시 running 플래그 설정
+        self._running = True
+
         # 재연결 시 Redis에서 정보 조회 시도
         if self._reconnect_attempts > 0:
             await self._load_from_redis()
