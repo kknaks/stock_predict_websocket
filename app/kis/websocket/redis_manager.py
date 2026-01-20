@@ -918,24 +918,795 @@ class WebSocketRedisManager:
             # 모든 종목 코드 조회
             targets_set_key = self._get_strategy_targets_set_key(user_strategy_id)
             stock_codes = self._redis_client.smembers(targets_set_key)
-            
+
             # 각 종목의 목표가 삭제
             for stock_code in stock_codes:
                 target_key = self._get_strategy_target_key(user_strategy_id, stock_code)
                 self._redis_client.delete(target_key)
-            
+
             # Set 삭제
             self._redis_client.delete(targets_set_key)
-            
+
             # 전략 설정도 삭제
             config_key = self._get_strategy_config_key(user_strategy_id)
             self._redis_client.delete(config_key)
-            
+
             logger.debug(f"All strategy targets deleted from Redis for strategy: {user_strategy_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to delete all strategy targets from Redis: {e}", exc_info=True)
             return False
+
+    # ==========================================================================
+    # Position 관리 메서드
+    # ==========================================================================
+
+    # Position Redis 키 접두사
+    POSITION_KEY_PREFIX = "position"
+    POSITION_LIST_KEY_PREFIX = "position:list"
+    POSITION_BY_USER_KEY_PREFIX = "position:by_user"
+
+    # Order Redis 키 접두사
+    ORDER_KEY_PREFIX = "order"
+    ORDER_BY_NO_KEY_PREFIX = "order:by_no"
+    ORDER_ACTIVE_KEY_PREFIX = "order:active"
+
+    # Position/Order TTL (25시간)
+    POSITION_TTL = 90000
+
+    def _get_position_key(self, daily_strategy_id: int, stock_code: str) -> str:
+        """Position Redis 키 생성"""
+        return f"{self.POSITION_KEY_PREFIX}:{daily_strategy_id}:{stock_code}"
+
+    def _get_position_list_key(self, daily_strategy_id: int) -> str:
+        """Position 목록 Redis 키 생성"""
+        return f"{self.POSITION_LIST_KEY_PREFIX}:{daily_strategy_id}"
+
+    def _get_position_by_user_key(self, user_strategy_id: int, stock_code: str) -> str:
+        """user_strategy_id로 Position 조회용 인덱스 키"""
+        return f"{self.POSITION_BY_USER_KEY_PREFIX}:{user_strategy_id}:{stock_code}"
+
+    def _get_order_key(self, order_id: str) -> str:
+        """Order Redis 키 생성"""
+        return f"{self.ORDER_KEY_PREFIX}:{order_id}"
+
+    def _get_order_by_no_key(self, order_no: str) -> str:
+        """order_no로 Order 조회용 인덱스 키"""
+        return f"{self.ORDER_BY_NO_KEY_PREFIX}:{order_no}"
+
+    def _get_order_active_key(self, daily_strategy_id: int, stock_code: str) -> str:
+        """활성 주문 목록 Redis 키 (Set)"""
+        return f"{self.ORDER_ACTIVE_KEY_PREFIX}:{daily_strategy_id}:{stock_code}"
+
+    def save_position(self, daily_strategy_id: int, stock_code: str, position_data: dict) -> bool:
+        """
+        Position을 Redis에 저장
+
+        Args:
+            daily_strategy_id: 일일 전략 ID
+            stock_code: 종목 코드
+            position_data: Position 데이터 (dict)
+
+        Returns:
+            성공 여부
+        """
+        if not self._redis_client:
+            logger.warning("Redis not connected, skipping save position")
+            return False
+
+        try:
+            # Position 저장
+            key = self._get_position_key(daily_strategy_id, stock_code)
+            self._redis_client.setex(
+                key,
+                self.POSITION_TTL,
+                json.dumps(position_data, ensure_ascii=False, default=str)
+            )
+
+            # 인덱스 업데이트: position:list:{daily_strategy_id} (Set)
+            list_key = self._get_position_list_key(daily_strategy_id)
+            self._redis_client.sadd(list_key, stock_code)
+            self._redis_client.expire(list_key, self.POSITION_TTL)
+
+            # user_strategy_id 인덱스: position:by_user:{user_strategy_id}:{stock_code} → daily_strategy_id
+            user_strategy_id = position_data.get("user_strategy_id")
+            if user_strategy_id:
+                user_key = self._get_position_by_user_key(user_strategy_id, stock_code)
+                self._redis_client.setex(user_key, self.POSITION_TTL, str(daily_strategy_id))
+
+            logger.debug(
+                f"Position saved: daily_strategy_id={daily_strategy_id}, "
+                f"stock_code={stock_code}, "
+                f"holding_quantity={position_data.get('holding_quantity', 0)}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to save position to Redis: {e}", exc_info=True)
+            return False
+
+    def get_position(self, daily_strategy_id: int, stock_code: str) -> Optional[Dict[str, Any]]:
+        """
+        Position 조회
+
+        Args:
+            daily_strategy_id: 일일 전략 ID
+            stock_code: 종목 코드
+
+        Returns:
+            Position 데이터 또는 None
+        """
+        if not self._redis_client:
+            return None
+
+        try:
+            key = self._get_position_key(daily_strategy_id, stock_code)
+            data = self._redis_client.get(key)
+            if data:
+                return json.loads(data)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get position from Redis: {e}", exc_info=True)
+            return None
+
+    def get_position_by_user(self, user_strategy_id: int, stock_code: str) -> Optional[Dict[str, Any]]:
+        """
+        user_strategy_id로 Position 조회
+
+        Args:
+            user_strategy_id: 사용자 전략 ID
+            stock_code: 종목 코드
+
+        Returns:
+            Position 데이터 또는 None
+        """
+        if not self._redis_client:
+            return None
+
+        try:
+            # user_strategy_id → daily_strategy_id 인덱스 조회
+            user_key = self._get_position_by_user_key(user_strategy_id, stock_code)
+            daily_strategy_id_str = self._redis_client.get(user_key)
+
+            if daily_strategy_id_str:
+                daily_strategy_id = int(daily_strategy_id_str)
+                return self.get_position(daily_strategy_id, stock_code)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get position by user from Redis: {e}", exc_info=True)
+            return None
+
+    def get_all_positions(self, daily_strategy_id: int) -> list:
+        """
+        daily_strategy_id의 모든 Position 조회
+
+        Args:
+            daily_strategy_id: 일일 전략 ID
+
+        Returns:
+            Position 목록 (list of dict)
+        """
+        if not self._redis_client:
+            return []
+
+        try:
+            list_key = self._get_position_list_key(daily_strategy_id)
+            stock_codes = self._redis_client.smembers(list_key)
+
+            positions = []
+            for stock_code in stock_codes:
+                position = self.get_position(daily_strategy_id, stock_code)
+                if position:
+                    positions.append(position)
+            return positions
+        except Exception as e:
+            logger.error(f"Failed to get all positions from Redis: {e}", exc_info=True)
+            return []
+
+    def get_positions_with_holdings(self, daily_strategy_id: int) -> list:
+        """
+        보유 수량이 있는 모든 Position 조회 (holding_quantity > 0)
+
+        Args:
+            daily_strategy_id: 일일 전략 ID
+
+        Returns:
+            보유 중인 Position 목록
+        """
+        positions = self.get_all_positions(daily_strategy_id)
+        return [p for p in positions if p.get("holding_quantity", 0) > 0]
+
+    def update_position_buy(
+        self,
+        daily_strategy_id: int,
+        stock_code: str,
+        exec_qty: int,
+        exec_price: float
+    ) -> bool:
+        """
+        매수 체결 시 Position 업데이트
+
+        - holding_quantity += 체결수량
+        - average_price 가중평균 재계산
+        - total_buy_quantity, total_buy_amount 업데이트
+
+        Args:
+            daily_strategy_id: 일일 전략 ID
+            stock_code: 종목 코드
+            exec_qty: 체결 수량
+            exec_price: 체결 가격
+
+        Returns:
+            성공 여부
+        """
+        if not self._redis_client:
+            return False
+
+        try:
+            position = self.get_position(daily_strategy_id, stock_code)
+            if not position:
+                logger.warning(
+                    f"Position not found for buy update: "
+                    f"daily_strategy_id={daily_strategy_id}, stock_code={stock_code}"
+                )
+                return False
+
+            # 가중평균 가격 계산
+            current_qty = position.get("holding_quantity", 0)
+            current_avg = position.get("average_price", 0.0)
+            total_qty = current_qty + exec_qty
+
+            if total_qty > 0:
+                new_avg = (
+                    (current_qty * current_avg) + (exec_qty * exec_price)
+                ) / total_qty
+            else:
+                new_avg = exec_price
+
+            # Position 업데이트
+            position["holding_quantity"] = total_qty
+            position["average_price"] = round(new_avg, 2)
+            position["total_investment"] = round(total_qty * new_avg, 2)
+            position["total_buy_quantity"] = position.get("total_buy_quantity", 0) + exec_qty
+            position["total_buy_amount"] = position.get("total_buy_amount", 0.0) + (exec_qty * exec_price)
+            position["updated_at"] = datetime.now().isoformat()
+
+            # 저장
+            success = self.save_position(daily_strategy_id, stock_code, position)
+
+            if success:
+                logger.info(
+                    f"✅ Position 매수 업데이트: "
+                    f"종목={stock_code}, "
+                    f"체결수량={exec_qty}, "
+                    f"체결가격={exec_price:,.0f}, "
+                    f"보유수량={total_qty}, "
+                    f"평균가={new_avg:,.0f}"
+                )
+            return success
+
+        except Exception as e:
+            logger.error(f"Failed to update position buy: {e}", exc_info=True)
+            return False
+
+    def update_position_sell(
+        self,
+        daily_strategy_id: int,
+        stock_code: str,
+        exec_qty: int,
+        exec_price: float
+    ) -> bool:
+        """
+        매도 체결 시 Position 업데이트
+
+        - holding_quantity -= 체결수량
+        - realized_pnl 계산
+        - total_sell_quantity, total_sell_amount 업데이트
+
+        Args:
+            daily_strategy_id: 일일 전략 ID
+            stock_code: 종목 코드
+            exec_qty: 체결 수량
+            exec_price: 체결 가격
+
+        Returns:
+            성공 여부
+        """
+        if not self._redis_client:
+            return False
+
+        try:
+            position = self.get_position(daily_strategy_id, stock_code)
+            if not position:
+                logger.warning(
+                    f"Position not found for sell update: "
+                    f"daily_strategy_id={daily_strategy_id}, stock_code={stock_code}"
+                )
+                return False
+
+            avg_price = position.get("average_price", 0.0)
+
+            # 실현 손익 계산
+            pnl = (exec_price - avg_price) * exec_qty
+
+            # Position 업데이트
+            new_holding_qty = position.get("holding_quantity", 0) - exec_qty
+            position["holding_quantity"] = max(0, new_holding_qty)
+            position["total_sell_quantity"] = position.get("total_sell_quantity", 0) + exec_qty
+            position["total_sell_amount"] = position.get("total_sell_amount", 0.0) + (exec_qty * exec_price)
+            position["realized_pnl"] = position.get("realized_pnl", 0.0) + pnl
+            position["updated_at"] = datetime.now().isoformat()
+
+            # 보유 수량이 0이면 투자금액도 0
+            if position["holding_quantity"] <= 0:
+                position["holding_quantity"] = 0
+                position["total_investment"] = 0
+            else:
+                position["total_investment"] = round(position["holding_quantity"] * avg_price, 2)
+
+            # 저장
+            success = self.save_position(daily_strategy_id, stock_code, position)
+
+            if success:
+                logger.info(
+                    f"✅ Position 매도 업데이트: "
+                    f"종목={stock_code}, "
+                    f"체결수량={exec_qty}, "
+                    f"체결가격={exec_price:,.0f}, "
+                    f"잔여수량={position['holding_quantity']}, "
+                    f"실현손익={pnl:,.0f}"
+                )
+            return success
+
+        except Exception as e:
+            logger.error(f"Failed to update position sell: {e}", exc_info=True)
+            return False
+
+    def create_position_if_not_exists(
+        self,
+        daily_strategy_id: int,
+        user_strategy_id: int,
+        stock_code: str,
+        stock_name: str = ""
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Position이 없으면 새로 생성
+
+        Args:
+            daily_strategy_id: 일일 전략 ID
+            user_strategy_id: 사용자 전략 ID
+            stock_code: 종목 코드
+            stock_name: 종목명
+
+        Returns:
+            Position 데이터
+        """
+        position = self.get_position(daily_strategy_id, stock_code)
+        if position:
+            return position
+
+        # 새 Position 생성
+        now = datetime.now().isoformat()
+        new_position = {
+            "daily_strategy_id": daily_strategy_id,
+            "user_strategy_id": user_strategy_id,
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "holding_quantity": 0,
+            "average_price": 0.0,
+            "total_investment": 0.0,
+            "total_buy_quantity": 0,
+            "total_buy_amount": 0.0,
+            "total_sell_quantity": 0,
+            "total_sell_amount": 0.0,
+            "realized_pnl": 0.0,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+        if self.save_position(daily_strategy_id, stock_code, new_position):
+            logger.info(
+                f"New position created: "
+                f"daily_strategy_id={daily_strategy_id}, "
+                f"user_strategy_id={user_strategy_id}, "
+                f"stock_code={stock_code}"
+            )
+            return new_position
+        return None
+
+    # ==========================================================================
+    # Order 관리 메서드
+    # ==========================================================================
+
+    def save_order(self, order_data: dict) -> bool:
+        """
+        Order를 Redis에 저장
+
+        Args:
+            order_data: Order 데이터 (dict)
+
+        Returns:
+            성공 여부
+        """
+        if not self._redis_client:
+            logger.warning("Redis not connected, skipping save order")
+            return False
+
+        try:
+            order_id = order_data.get("order_id")
+            if not order_id:
+                logger.error("order_id is required to save order")
+                return False
+
+            # Order 저장
+            key = self._get_order_key(order_id)
+            self._redis_client.setex(
+                key,
+                self.POSITION_TTL,
+                json.dumps(order_data, ensure_ascii=False, default=str)
+            )
+
+            # order_no 인덱스 (order_no가 있는 경우만)
+            order_no = order_data.get("order_no")
+            if order_no:
+                order_no_key = self._get_order_by_no_key(order_no)
+                self._redis_client.setex(order_no_key, self.POSITION_TTL, order_id)
+
+            # 활성 주문 인덱스 (미체결 상태인 경우)
+            status = order_data.get("status", "pending")
+            if status in ["pending", "submitted", "ordered", "partial"]:
+                daily_strategy_id = order_data.get("daily_strategy_id")
+                stock_code = order_data.get("stock_code")
+                if daily_strategy_id and stock_code:
+                    active_key = self._get_order_active_key(daily_strategy_id, stock_code)
+                    self._redis_client.sadd(active_key, order_id)
+                    self._redis_client.expire(active_key, self.POSITION_TTL)
+
+            logger.debug(
+                f"Order saved: order_id={order_id}, "
+                f"order_no={order_no}, "
+                f"status={status}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to save order to Redis: {e}", exc_info=True)
+            return False
+
+    def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Order 조회
+
+        Args:
+            order_id: 주문 ID
+
+        Returns:
+            Order 데이터 또는 None
+        """
+        if not self._redis_client:
+            return None
+
+        try:
+            key = self._get_order_key(order_id)
+            data = self._redis_client.get(key)
+            if data:
+                return json.loads(data)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get order from Redis: {e}", exc_info=True)
+            return None
+
+    def get_order_by_order_no(self, order_no: str) -> Optional[Dict[str, Any]]:
+        """
+        order_no로 Order 조회
+
+        Args:
+            order_no: KIS API 주문번호
+
+        Returns:
+            Order 데이터 또는 None
+        """
+        if not self._redis_client:
+            return None
+
+        try:
+            order_no_key = self._get_order_by_no_key(order_no)
+            order_id = self._redis_client.get(order_no_key)
+
+            if order_id:
+                return self.get_order(order_id)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get order by order_no from Redis: {e}", exc_info=True)
+            return None
+
+    def get_active_orders(self, daily_strategy_id: int, stock_code: str) -> list:
+        """
+        활성 주문 목록 조회
+
+        Args:
+            daily_strategy_id: 일일 전략 ID
+            stock_code: 종목 코드
+
+        Returns:
+            활성 Order 목록
+        """
+        if not self._redis_client:
+            return []
+
+        try:
+            active_key = self._get_order_active_key(daily_strategy_id, stock_code)
+            order_ids = self._redis_client.smembers(active_key)
+
+            orders = []
+            for order_id in order_ids:
+                order = self.get_order(order_id)
+                if order and order.get("status") in ["pending", "submitted", "ordered", "partial"]:
+                    orders.append(order)
+            return orders
+        except Exception as e:
+            logger.error(f"Failed to get active orders from Redis: {e}", exc_info=True)
+            return []
+
+    def get_active_sell_order(self, daily_strategy_id: int, stock_code: str) -> Optional[Dict[str, Any]]:
+        """
+        활성 매도 주문 조회 (하나만)
+
+        Args:
+            daily_strategy_id: 일일 전략 ID
+            stock_code: 종목 코드
+
+        Returns:
+            활성 매도 Order 또는 None
+        """
+        active_orders = self.get_active_orders(daily_strategy_id, stock_code)
+        for order in active_orders:
+            if order.get("order_type") == "SELL":
+                return order
+        return None
+
+    def get_active_buy_order(self, daily_strategy_id: int, stock_code: str) -> Optional[Dict[str, Any]]:
+        """
+        활성 매수 주문 조회 (하나만)
+
+        Args:
+            daily_strategy_id: 일일 전략 ID
+            stock_code: 종목 코드
+
+        Returns:
+            활성 매수 Order 또는 None
+        """
+        active_orders = self.get_active_orders(daily_strategy_id, stock_code)
+        for order in active_orders:
+            if order.get("order_type") == "BUY":
+                return order
+        return None
+
+    def update_order_status(
+        self,
+        order_id: str,
+        status: str,
+        order_no: Optional[str] = None,
+        executed_quantity: Optional[int] = None,
+        executed_price: Optional[float] = None
+    ) -> bool:
+        """
+        Order 상태 업데이트
+
+        Args:
+            order_id: 주문 ID
+            status: 새 상태
+            order_no: KIS API 주문번호 (선택)
+            executed_quantity: 체결 수량 (선택)
+            executed_price: 체결 가격 (선택)
+
+        Returns:
+            성공 여부
+        """
+        if not self._redis_client:
+            return False
+
+        try:
+            order = self.get_order(order_id)
+            if not order:
+                logger.warning(f"Order not found for status update: order_id={order_id}")
+                return False
+
+            # 상태 업데이트
+            old_status = order.get("status")
+            order["status"] = status
+            order["updated_at"] = datetime.now().isoformat()
+
+            if order_no:
+                order["order_no"] = order_no
+
+            if executed_quantity is not None:
+                order["executed_quantity"] = executed_quantity
+                order["remaining_quantity"] = order.get("order_quantity", 0) - executed_quantity
+
+            if executed_price is not None:
+                order["executed_price"] = executed_price
+
+            # 저장
+            success = self.save_order(order)
+
+            # 체결 완료 또는 취소 시 활성 주문 목록에서 제거
+            if status in ["filled", "cancelled", "rejected"]:
+                daily_strategy_id = order.get("daily_strategy_id")
+                stock_code = order.get("stock_code")
+                if daily_strategy_id and stock_code:
+                    active_key = self._get_order_active_key(daily_strategy_id, stock_code)
+                    self._redis_client.srem(active_key, order_id)
+
+            if success:
+                logger.info(
+                    f"Order status updated: order_id={order_id}, "
+                    f"{old_status} → {status}, "
+                    f"executed_qty={executed_quantity}"
+                )
+            return success
+
+        except Exception as e:
+            logger.error(f"Failed to update order status: {e}", exc_info=True)
+            return False
+
+    def remove_order_from_active(self, order_id: str) -> bool:
+        """
+        활성 주문 목록에서 제거
+
+        Args:
+            order_id: 주문 ID
+
+        Returns:
+            성공 여부
+        """
+        if not self._redis_client:
+            return False
+
+        try:
+            order = self.get_order(order_id)
+            if not order:
+                return False
+
+            daily_strategy_id = order.get("daily_strategy_id")
+            stock_code = order.get("stock_code")
+
+            if daily_strategy_id and stock_code:
+                active_key = self._get_order_active_key(daily_strategy_id, stock_code)
+                self._redis_client.srem(active_key, order_id)
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Failed to remove order from active: {e}", exc_info=True)
+            return False
+
+    # ==========================================================================
+    # Daily Strategy ID 관리
+    # ==========================================================================
+
+    DAILY_STRATEGY_KEY_PREFIX = "daily_strategy"
+    DAILY_STRATEGY_BY_USER_KEY_PREFIX = "daily_strategy:by_user"
+
+    def _get_daily_strategy_key(self, daily_strategy_id: int) -> str:
+        """Daily Strategy Redis 키 생성"""
+        return f"{self.DAILY_STRATEGY_KEY_PREFIX}:{daily_strategy_id}"
+
+    def _get_daily_strategy_by_user_key(self, user_strategy_id: int) -> str:
+        """user_strategy_id로 daily_strategy_id 조회용 인덱스 키"""
+        return f"{self.DAILY_STRATEGY_BY_USER_KEY_PREFIX}:{user_strategy_id}"
+
+    def save_daily_strategy(self, daily_strategy_id: int, user_strategy_id: int, data: dict) -> bool:
+        """
+        Daily Strategy 정보 저장
+
+        Args:
+            daily_strategy_id: 일일 전략 ID
+            user_strategy_id: 사용자 전략 ID
+            data: 추가 데이터
+
+        Returns:
+            성공 여부
+        """
+        if not self._redis_client:
+            return False
+
+        try:
+            # Daily Strategy 저장
+            key = self._get_daily_strategy_key(daily_strategy_id)
+            strategy_data = {
+                "daily_strategy_id": daily_strategy_id,
+                "user_strategy_id": user_strategy_id,
+                "created_at": datetime.now().isoformat(),
+                **data
+            }
+            self._redis_client.setex(
+                key,
+                self.POSITION_TTL,
+                json.dumps(strategy_data, ensure_ascii=False, default=str)
+            )
+
+            # user_strategy_id → daily_strategy_id 인덱스
+            user_key = self._get_daily_strategy_by_user_key(user_strategy_id)
+            self._redis_client.setex(user_key, self.POSITION_TTL, str(daily_strategy_id))
+
+            logger.info(
+                f"Daily strategy saved: "
+                f"daily_strategy_id={daily_strategy_id}, "
+                f"user_strategy_id={user_strategy_id}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to save daily strategy: {e}", exc_info=True)
+            return False
+
+    def get_daily_strategy_id(self, user_strategy_id: int) -> Optional[int]:
+        """
+        user_strategy_id로 daily_strategy_id 조회
+
+        Args:
+            user_strategy_id: 사용자 전략 ID
+
+        Returns:
+            daily_strategy_id 또는 None
+        """
+        if not self._redis_client:
+            return None
+
+        try:
+            user_key = self._get_daily_strategy_by_user_key(user_strategy_id)
+            daily_strategy_id_str = self._redis_client.get(user_key)
+
+            if daily_strategy_id_str:
+                return int(daily_strategy_id_str)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get daily_strategy_id: {e}", exc_info=True)
+            return None
+
+    def get_daily_strategy(self, daily_strategy_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Daily Strategy 조회
+
+        Args:
+            daily_strategy_id: 일일 전략 ID
+
+        Returns:
+            Daily Strategy 데이터 또는 None
+        """
+        if not self._redis_client:
+            return None
+
+        try:
+            key = self._get_daily_strategy_key(daily_strategy_id)
+            data = self._redis_client.get(key)
+            if data:
+                return json.loads(data)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get daily strategy: {e}", exc_info=True)
+            return None
+
+    def generate_daily_strategy_id(self) -> int:
+        """
+        새로운 daily_strategy_id 생성 (Redis INCR 사용)
+
+        Returns:
+            새 daily_strategy_id
+        """
+        if not self._redis_client:
+            # Redis 없으면 타임스탬프 기반 ID
+            return int(datetime.now().strftime("%Y%m%d%H%M%S"))
+
+        try:
+            counter_key = "daily_strategy:counter"
+            new_id = self._redis_client.incr(counter_key)
+            # 하루 후 만료 (다음 날 새로 시작)
+            self._redis_client.expire(counter_key, 86400)
+            return new_id
+        except Exception as e:
+            logger.error(f"Failed to generate daily_strategy_id: {e}", exc_info=True)
+            return int(datetime.now().strftime("%Y%m%d%H%M%S"))
 
 
 # 싱글톤 인스턴스

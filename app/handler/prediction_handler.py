@@ -69,11 +69,11 @@ class PredictionHandler:
 
         logger.info(f"Candidate stocks: {candidate_stocks}")
         
-        # 전략 테이블에 예측 데이터 처리 (목표가 계산)
+        # 전략 테이블에 예측 데이터 처리 (목표가 계산) - 필터링된 후보군만 전달
         strategy_table = get_strategy_table()
         try:
-            await strategy_table.process_predictions(message.predictions)
-            logger.info(f"Processed {len(message.predictions)} predictions for strategy tables")
+            await strategy_table.process_predictions(candidate_stocks)
+            logger.info(f"Processed {len(candidate_stocks)} candidate stocks for strategy tables")
         except Exception as e:
             logger.error(f"Error processing predictions for strategy tables: {e}", exc_info=True)
         

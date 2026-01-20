@@ -98,8 +98,7 @@ class SignalExecutor:
                         time_diff = current_time - opening_time
 
                         # 10분 초과 시 스킵
-                        # TODO 10분으로 변경
-                        if time_diff > timedelta(minutes=300):
+                        if time_diff > timedelta(minutes=10):
                             logger.debug(
                                 f"시가 매수 조건 불만족 (10분 초과): "
                                 f"종목={stock_code}, "
@@ -176,12 +175,13 @@ class SignalExecutor:
 
     async def check_and_generate_sell_signal(self, price_data: dict) -> None:
         """
-        매도 시그널 생성 체크 (최적화 버전)
+        매도 시그널 생성 체크 (Position 기반)
 
         최적화:
         1. 쓰로틀링: 같은 종목은 0.5초 간격으로만 체크
         2. 가격 변동 체크: 가격이 변하지 않으면 스킵
         3. 중복 방지: 이미 SELL 시그널 생성된 전략-종목은 스킵
+        4. Position 기반: holding_quantity > 0 인 경우에만 매도 시그널 생성
         """
         try:
             stock_code = price_data.get('MKSC_SHRN_ISCD', '')
@@ -218,9 +218,31 @@ class SignalExecutor:
 
             for user_strategy_id in strategy_ids:
                 # 최적화 3: 이미 SELL 시그널 생성된 조합은 스킵
-                signal_key = f"{user_strategy_id}_{stock_code}"
+                signal_key = f"{user_strategy_id}_{stock_code}_SELL"
                 if signal_key in self._generated_signals:
                     continue
+
+                # Position 조회 (보유 수량 확인)
+                position = self._redis_manager.get_position_by_user(user_strategy_id, stock_code)
+                holding_quantity = position.get("holding_quantity", 0) if position else 0
+
+                # 보유 수량 없으면 스킵
+                if holding_quantity <= 0:
+                    continue
+
+                # 활성 매도 주문 확인 (중복 주문 방지)
+                if position:
+                    daily_strategy_id = position.get("daily_strategy_id")
+                    if daily_strategy_id:
+                        active_sell = self._redis_manager.get_active_sell_order(
+                            daily_strategy_id, stock_code
+                        )
+                        if active_sell:
+                            logger.debug(
+                                f"활성 매도 주문 있음, 스킵: "
+                                f"전략={user_strategy_id}, 종목={stock_code}"
+                            )
+                            continue
 
                 target = self._strategy_table.get_target_for_comparison(
                     user_strategy_id, stock_code
@@ -229,14 +251,14 @@ class SignalExecutor:
                 if target is None:
                     continue
 
-                # 매도 시그널 생성
+                # 매도 시그널 생성 (Position의 holding_quantity 사용)
                 signal = self._signal_generator.generate_sell_signal(
                     stock_code=stock_code,
                     price_data=price_data,
                     asking_price_data=asking_price_data,
                     target_price=target.sell_price,
                     stop_loss_price=target.stop_loss_price,
-                    order_quantity=target.target_quantity  # 기본값, 실제로는 보유 수량 참조
+                    order_quantity=holding_quantity  # Position의 보유 수량 사용
                 )
 
                 if signal:
@@ -274,14 +296,14 @@ class SignalExecutor:
                     f"긴급도={signal.urgency}, "
                     f"사유={signal.reason}"
                 )
-                
+
                 # 주문 처리 (mock 여부에 따라 자동 분기)
                 order_result = await self._order_api.process_buy_order(
                     user_strategy_id=user_strategy_id,
                     signal=signal,
-                    order_quantity=signal.target_quantity  # 기본값
+                    order_quantity=signal.target_quantity
                 )
-                
+
                 if order_result.get("success"):
                     logger.info(
                         f"✅ 매수 주문 처리 완료: "
@@ -290,13 +312,37 @@ class SignalExecutor:
                         f"결과={order_result}"
                     )
                 else:
-                    logger.error(
-                        f"❌ 매수 주문 처리 실패: "
+                    # 주문 실패 시 1회 재시도
+                    logger.warning(
+                        f"⚠️ 매수 주문 실패, 재시도 중: "
                         f"[전략={user_strategy_id}] "
                         f"종목={signal.stock_code}, "
                         f"오류={order_result.get('error', 'N/A')}"
                     )
-                
+
+                    # 재시도
+                    retry_result = await self._order_api.process_buy_order(
+                        user_strategy_id=user_strategy_id,
+                        signal=signal,
+                        order_quantity=signal.target_quantity
+                    )
+
+                    if retry_result.get("success"):
+                        logger.info(
+                            f"✅ 매수 주문 재시도 성공: "
+                            f"[전략={user_strategy_id}] "
+                            f"종목={signal.stock_code}"
+                        )
+                    else:
+                        logger.error(
+                            f"❌ 매수 주문 재시도 실패: "
+                            f"[전략={user_strategy_id}] "
+                            f"종목={signal.stock_code}, "
+                            f"오류={retry_result.get('error', 'N/A')}"
+                        )
+                        # 재시도도 실패하면 시그널 초기화 (다음 시그널 허용)
+                        self.clear_generated_signal(user_strategy_id, signal.stock_code, "BUY")
+
                 # Redis에 시그널 저장 (백업용)
                 await self._save_signal_to_redis(user_strategy_id, signal)
 
@@ -314,14 +360,14 @@ class SignalExecutor:
                     f"긴급도={signal.urgency}, "
                     f"사유={signal.reason}"
                 )
-                
+
                 # 주문 처리 (mock 여부에 따라 자동 분기)
                 order_result = await self._order_api.process_sell_order(
                     user_strategy_id=user_strategy_id,
                     signal=signal,
-                    order_quantity=signal.target_quantity  # 기본값, 실제로는 보유 수량 참조 필요
+                    order_quantity=signal.target_quantity  # Position의 holding_quantity
                 )
-                
+
                 if order_result.get("success"):
                     logger.info(
                         f"✅ 매도 주문 처리 완료: "
@@ -330,13 +376,37 @@ class SignalExecutor:
                         f"결과={order_result}"
                     )
                 else:
-                    logger.error(
-                        f"❌ 매도 주문 처리 실패: "
+                    # 주문 실패 시 1회 재시도
+                    logger.warning(
+                        f"⚠️ 매도 주문 실패, 재시도 중: "
                         f"[전략={user_strategy_id}] "
                         f"종목={signal.stock_code}, "
                         f"오류={order_result.get('error', 'N/A')}"
                     )
-                
+
+                    # 재시도
+                    retry_result = await self._order_api.process_sell_order(
+                        user_strategy_id=user_strategy_id,
+                        signal=signal,
+                        order_quantity=signal.target_quantity
+                    )
+
+                    if retry_result.get("success"):
+                        logger.info(
+                            f"✅ 매도 주문 재시도 성공: "
+                            f"[전략={user_strategy_id}] "
+                            f"종목={signal.stock_code}"
+                        )
+                    else:
+                        logger.error(
+                            f"❌ 매도 주문 재시도 실패: "
+                            f"[전략={user_strategy_id}] "
+                            f"종목={signal.stock_code}, "
+                            f"오류={retry_result.get('error', 'N/A')}"
+                        )
+                        # 재시도도 실패하면 시그널 초기화 (다음 시그널 허용)
+                        self.clear_generated_signal(user_strategy_id, signal.stock_code, "SELL")
+
                 # Redis에 시그널 저장 (백업용)
                 await self._save_signal_to_redis(user_strategy_id, signal)
 
@@ -407,15 +477,27 @@ class SignalExecutor:
         except Exception as e:
             logger.error(f"시그널 Redis 저장 실패: {e}", exc_info=True)
 
-    def clear_generated_signal(self, user_strategy_id: int, stock_code: str) -> None:
+    def clear_generated_signal(self, user_strategy_id: int, stock_code: str, signal_type: str = None) -> None:
         """
         생성된 시그널 초기화 (주문 체결 후 호출)
 
-        매도 주문이 체결된 후 호출하여 다음 매수-매도 사이클 허용
+        Args:
+            user_strategy_id: 사용자 전략 ID
+            stock_code: 종목 코드
+            signal_type: 시그널 유형 (BUY, SELL 또는 None - None이면 둘 다 초기화)
         """
-        signal_key = f"{user_strategy_id}_{stock_code}"
-        self._generated_signals.discard(signal_key)
-        logger.info(f"시그널 초기화: {signal_key}")
+        if signal_type:
+            # 특정 시그널 유형만 초기화
+            signal_key = f"{user_strategy_id}_{stock_code}_{signal_type}"
+            self._generated_signals.discard(signal_key)
+            logger.info(f"시그널 초기화: {signal_key}")
+        else:
+            # 모든 시그널 유형 초기화
+            buy_key = f"{user_strategy_id}_{stock_code}_BUY"
+            sell_key = f"{user_strategy_id}_{stock_code}_SELL"
+            self._generated_signals.discard(buy_key)
+            self._generated_signals.discard(sell_key)
+            logger.info(f"시그널 초기화: {buy_key}, {sell_key}")
 
 
 # 싱글톤 인스턴스

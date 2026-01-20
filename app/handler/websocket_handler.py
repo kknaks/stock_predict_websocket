@@ -103,6 +103,35 @@ class WebSocketHandler:
                         f"Initialized strategy tables for {len(all_strategies)} strategies: "
                         f"{[s.get('user_strategy_id') for s in all_strategies]}"
                     )
+
+                    # daily_strategy_id 생성 및 저장
+                    for strategy in all_strategies:
+                        user_strategy_id = strategy.get("user_strategy_id")
+                        if user_strategy_id:
+                            # 기존 daily_strategy_id 확인
+                            existing_id = self._redis_manager.get_daily_strategy_id(user_strategy_id)
+                            if not existing_id:
+                                # 새 daily_strategy_id 생성
+                                daily_strategy_id = self._redis_manager.generate_daily_strategy_id()
+                                self._redis_manager.save_daily_strategy(
+                                    daily_strategy_id=daily_strategy_id,
+                                    user_strategy_id=user_strategy_id,
+                                    data={
+                                        "is_mock": strategy.get("is_mock", False),
+                                        "user_id": strategy.get("user_id"),
+                                        "strategy_id": strategy.get("strategy_id"),
+                                    }
+                                )
+                                logger.info(
+                                    f"Created daily_strategy_id={daily_strategy_id} "
+                                    f"for user_strategy_id={user_strategy_id}"
+                                )
+                            else:
+                                logger.info(
+                                    f"Using existing daily_strategy_id={existing_id} "
+                                    f"for user_strategy_id={user_strategy_id}"
+                                )
+
                 except Exception as e:
                     logger.error(f"Error initializing strategy tables: {e}", exc_info=True)
             else:
@@ -130,10 +159,15 @@ class WebSocketHandler:
             all_strategy_ids = self._strategy_table.get_all_strategies()
             logger.info(f"전체 전략 수: {len(all_strategy_ids)}, 전략 IDs: {all_strategy_ids}")
 
-            # 2. 각 전략의 모든 타겟 조회 및 처리
+            # 2. 각 전략별 마감 처리
             for user_strategy_id in all_strategy_ids:
                 try:
-                    await self._close_strategy_orders(user_strategy_id)
+                    # Order 기반 미체결 매수 주문 취소
+                    await self._close_active_buy_orders(user_strategy_id)
+
+                    # Position 기반 미매도 종목 시장가 매도
+                    await self._close_unsold_positions(user_strategy_id)
+
                 except Exception as e:
                     logger.error(
                         f"전략별 주문 마감 처리 오류 (user_strategy_id={user_strategy_id}): {e}",
@@ -147,161 +181,154 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"Error processing CLOSING websocket message: {e}", exc_info=True)
 
-    async def _close_strategy_orders(self, user_strategy_id: int) -> None:
-        """전략별 주문 마감 처리"""
+    async def _close_active_buy_orders(self, user_strategy_id: int) -> None:
+        """Order 기반 미체결 매수 주문 취소"""
         try:
-            # 전략의 모든 타겟 조회
+            daily_strategy_id = self._redis_manager.get_daily_strategy_id(user_strategy_id)
+            if not daily_strategy_id:
+                logger.debug(f"daily_strategy_id 없음: user_strategy_id={user_strategy_id}")
+                return
+
+            # strategy:targets에서 종목 목록 조회
             all_targets = self._redis_manager.get_strategy_all_targets(user_strategy_id)
+            if not all_targets:
+                logger.debug(f"전략 타겟 없음: user_strategy_id={user_strategy_id}")
+                return
+
             logger.info(
-                f"전략 {user_strategy_id}의 종목 수: {len(all_targets)}, "
-                f"종목코드: {list(all_targets.keys())}"
+                f"미체결 매수 주문 취소 처리: "
+                f"user_strategy_id={user_strategy_id}, "
+                f"daily_strategy_id={daily_strategy_id}, "
+                f"종목수={len(all_targets)}"
             )
 
-            for stock_code, target_data in all_targets.items():
-                try:
-                    # 매수 주문 처리
-                    await self._close_buy_orders(user_strategy_id, stock_code, target_data)
-                    
-                    # 매도 주문 처리
-                    await self._close_sell_orders(user_strategy_id, stock_code, target_data)
-                    
-                except Exception as e:
+            for stock_code in all_targets.keys():
+                # 활성 매수 주문 조회
+                active_buy = self._redis_manager.get_active_buy_order(daily_strategy_id, stock_code)
+                if not active_buy:
+                    continue
+
+                order_no = active_buy.get("order_no")
+                order_quantity = active_buy.get("order_quantity", 0)
+                executed_quantity = active_buy.get("executed_quantity", 0)
+                remaining_quantity = order_quantity - executed_quantity
+
+                if not order_no or remaining_quantity <= 0:
+                    continue
+
+                logger.info(
+                    f"매수 주문 취소: "
+                    f"전략={user_strategy_id}, "
+                    f"종목={stock_code}, "
+                    f"주문번호={order_no}, "
+                    f"주문수량={order_quantity}, "
+                    f"체결수량={executed_quantity}, "
+                    f"미체결수량={remaining_quantity}"
+                )
+
+                cancel_result = await self._order_api.cancel_order(
+                    user_strategy_id=user_strategy_id,
+                    order_no=order_no,
+                    stock_code=stock_code
+                )
+
+                if cancel_result.get("success"):
+                    logger.info(
+                        f"✅ 매수 주문 취소 완료: "
+                        f"전략={user_strategy_id}, "
+                        f"종목={stock_code}, "
+                        f"주문번호={order_no}"
+                    )
+                else:
                     logger.error(
-                        f"종목별 주문 마감 처리 오류 "
-                        f"(user_strategy_id={user_strategy_id}, stock_code={stock_code}): {e}",
-                        exc_info=True
+                        f"❌ 매수 주문 취소 실패: "
+                        f"전략={user_strategy_id}, "
+                        f"종목={stock_code}, "
+                        f"주문번호={order_no}, "
+                        f"오류={cancel_result.get('error', 'N/A')}"
                     )
 
         except Exception as e:
-            logger.error(f"전략 주문 마감 처리 오류 (user_strategy_id={user_strategy_id}): {e}", exc_info=True)
+            logger.error(f"미체결 매수 주문 취소 처리 오류: {e}", exc_info=True)
 
-    async def _close_buy_orders(self, user_strategy_id: int, stock_code: str, target_data: dict) -> None:
-        """매수 주문 마감 처리"""
-        buy_order_no = target_data.get("buy_order_no")
-        buy_executed = target_data.get("buy_executed", False)
-        buy_quantity = target_data.get("buy_quantity", 0)
-        buy_executed_quantity = target_data.get("buy_executed_quantity", 0)
-        
-        # 매수 주문이 있고, 전량 체결되지 않은 경우
-        if buy_order_no and not buy_executed:
-            # 1. 주문이 나갔는데 매수 안된 경우 (buy_executed_quantity == 0)
-            # 2. 일부 매수된 경우 (buy_executed_quantity > 0 but < buy_quantity)
-            # 모두 취소 처리 (전체 주문 취소)
+    async def _close_unsold_positions(self, user_strategy_id: int) -> None:
+        """Position 기반 미매도 종목 시장가 매도"""
+        try:
+            # daily_strategy_id 조회
+            daily_strategy_id = self._redis_manager.get_daily_strategy_id(user_strategy_id)
+            if not daily_strategy_id:
+                logger.debug(f"daily_strategy_id 없음: user_strategy_id={user_strategy_id}")
+                return
+
+            # 보유 수량이 있는 모든 Position 조회
+            positions_with_holdings = self._redis_manager.get_positions_with_holdings(daily_strategy_id)
+
+            if not positions_with_holdings:
+                logger.info(f"미매도 Position 없음: user_strategy_id={user_strategy_id}")
+                return
+
             logger.info(
-                f"매수 주문 취소: "
-                f"전략={user_strategy_id}, "
-                f"종목={stock_code}, "
-                f"주문번호={buy_order_no}, "
-                f"주문수량={buy_quantity}, "
-                f"체결수량={buy_executed_quantity}, "
-                f"남은수량={buy_quantity - buy_executed_quantity}"
+                f"미매도 Position 마감 처리: "
+                f"user_strategy_id={user_strategy_id}, "
+                f"daily_strategy_id={daily_strategy_id}, "
+                f"종목수={len(positions_with_holdings)}"
             )
-            
-            cancel_result = await self._order_api.cancel_order(
-                user_strategy_id=user_strategy_id,
-                order_no=buy_order_no,
-                stock_code=stock_code
-            )
-            
-            if cancel_result.get("success"):
+
+            for position in positions_with_holdings:
+                stock_code = position.get("stock_code")
+                holding_quantity = position.get("holding_quantity", 0)
+                stock_name = position.get("stock_name", "")
+
+                if holding_quantity <= 0:
+                    continue
+
                 logger.info(
-                    f"✅ 매수 주문 취소 완료: "
+                    f"시장가 매도 (Position 기반): "
                     f"전략={user_strategy_id}, "
                     f"종목={stock_code}, "
-                    f"주문번호={buy_order_no}"
-                )
-            else:
-                logger.error(
-                    f"❌ 매수 주문 취소 실패: "
-                    f"전략={user_strategy_id}, "
-                    f"종목={stock_code}, "
-                    f"주문번호={buy_order_no}, "
-                    f"오류={cancel_result.get('error', 'N/A')}"
+                    f"보유수량={holding_quantity}"
                 )
 
-    async def _close_sell_orders(self, user_strategy_id: int, stock_code: str, target_data: dict) -> None:
-        """매도 주문 마감 처리 - 매수된 종목 중 미매도 종목 시장가 매도"""
-        buy_executed = target_data.get("buy_executed", False)
-        buy_executed_quantity = target_data.get("buy_executed_quantity", 0)
-        sell_executed = target_data.get("sell_executed", False)
-        sell_executed_quantity = target_data.get("sell_executed_quantity", 0)
-        sell_order_no = target_data.get("sell_order_no")
-        
-        # 매수된 종목이 있는 경우에만 처리
-        if buy_executed and buy_executed_quantity > 0:
-            # 남은 매도 수량 계산
-            remaining_sell_quantity = buy_executed_quantity - sell_executed_quantity
-            
-            # 매도가 안 되었거나, 일부 매도가 된 경우
-            if remaining_sell_quantity > 0:
-                logger.info(
-                    f"매도 주문 (시장가): "
-                    f"전략={user_strategy_id}, "
-                    f"종목={stock_code}, "
-                    f"매수수량={buy_executed_quantity}, "
-                    f"매도수량={sell_executed_quantity}, "
-                    f"남은매도수량={remaining_sell_quantity}"
-                )
-                
-                # 기존 매도 주문이 있고 미체결인 경우 취소
-                if sell_order_no and not sell_executed:
-                    logger.info(
-                        f"기존 매도 주문 취소 후 재주문: "
-                        f"전략={user_strategy_id}, "
-                        f"종목={stock_code}, "
-                        f"주문번호={sell_order_no}"
-                    )
-                    cancel_result = await self._order_api.cancel_order(
-                        user_strategy_id=user_strategy_id,
-                        order_no=sell_order_no,
-                        stock_code=stock_code
-                    )
-                    if not cancel_result.get("success"):
-                        logger.warning(
-                            f"기존 매도 주문 취소 실패 (무시하고 진행): "
-                            f"전략={user_strategy_id}, "
-                            f"종목={stock_code}, "
-                            f"오류={cancel_result.get('error', 'N/A')}"
-                        )
-                
-                # 시장가 매도 주문 생성 (SignalResult 생성)
-                # 시장가 매도는 현재가로 주문 (가격은 0으로 설정하거나 시장가 코드 사용)
+                # 시장가 매도 주문 생성
                 market_sell_signal = SignalResult(
                     signal_type="SELL",
                     stock_code=stock_code,
-                    current_price=0.0,  # 시장가이므로 가격 불필요
+                    current_price=0.0,
                     target_price=None,
-                    target_quantity=remaining_sell_quantity,
+                    target_quantity=holding_quantity,
                     stop_loss_price=None,
-                    recommended_order_price=0.0,  # 시장가 (01)
-                    recommended_order_type=OrderType.MARKET,  # 시장가
+                    recommended_order_price=0.0,  # 시장가
+                    recommended_order_type=OrderType.MARKET,
                     expected_slippage_pct=0.0,
-                    urgency="CRITICAL",  # 장 마감이므로 긴급
-                    reason="장 마감 시 강제 매도 (시장가)"
+                    urgency="CRITICAL",
+                    reason="장 마감 시 Position 기반 강제 매도 (시장가)"
                 )
-                
+
                 # 시장가 매도 주문 실행
                 sell_result = await self._order_api.process_sell_order(
                     user_strategy_id=user_strategy_id,
                     signal=market_sell_signal,
-                    order_quantity=remaining_sell_quantity
+                    order_quantity=holding_quantity,
+                    stock_name=stock_name
                 )
-                
+
                 if sell_result.get("success"):
                     logger.info(
-                        f"✅ 시장가 매도 주문 완료: "
+                        f"✅ Position 기반 시장가 매도 완료: "
                         f"전략={user_strategy_id}, "
                         f"종목={stock_code}, "
-                        f"수량={remaining_sell_quantity}"
+                        f"수량={holding_quantity}"
                     )
                 else:
                     logger.error(
-                        f"❌ 시장가 매도 주문 실패: "
+                        f"❌ Position 기반 시장가 매도 실패: "
                         f"전략={user_strategy_id}, "
                         f"종목={stock_code}, "
-                        f"수량={remaining_sell_quantity}, "
                         f"오류={sell_result.get('error', 'N/A')}"
                     )
+
+        except Exception as e:
+            logger.error(f"Position 기반 마감 처리 오류: {e}", exc_info=True)
 
     async def _handle_stop_command(self, websocket_msg: WebSocketCommand) -> None:
         """STOP 웹소켓 메시지 처리"""

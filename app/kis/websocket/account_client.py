@@ -446,21 +446,104 @@ class AccountWebSocketClient:
                             exec_price = float(exec_price_str)
                             exec_qty = int(exec_qty_str)
                             is_buy = order_type == "00" or exec_type in ["매수", "BUY", "01"]
-                            
-                            # 해당 계좌의 모든 전략에 대해 체결통보 처리
+
+                            # 1. order_no로 Order 조회
+                            order_data = self._redis_manager.get_order_by_order_no(order_no)
+
+                            if order_data:
+                                # Order가 있는 경우 (새 로직)
+                                daily_strategy_id = order_data.get("daily_strategy_id")
+                                user_strategy_id = order_data.get("user_strategy_id")
+                                order_quantity = order_data.get("order_quantity", 0)
+                                order_id = order_data.get("order_id")
+
+                                # 2. Position 업데이트
+                                if is_buy:
+                                    self._redis_manager.update_position_buy(
+                                        daily_strategy_id=daily_strategy_id,
+                                        stock_code=stock_code,
+                                        exec_qty=exec_qty,
+                                        exec_price=exec_price
+                                    )
+                                else:
+                                    self._redis_manager.update_position_sell(
+                                        daily_strategy_id=daily_strategy_id,
+                                        stock_code=stock_code,
+                                        exec_qty=exec_qty,
+                                        exec_price=exec_price
+                                    )
+
+                                # 3. Order 상태 업데이트
+                                prev_exec_qty = order_data.get("executed_quantity", 0)
+                                total_exec_qty = prev_exec_qty + exec_qty
+                                is_fully_executed = total_exec_qty >= order_quantity
+
+                                self._redis_manager.update_order_status(
+                                    order_id=order_id,
+                                    status="filled" if is_fully_executed else "partial",
+                                    executed_quantity=total_exec_qty,
+                                    executed_price=exec_price
+                                )
+
+                                # 4. 업데이트된 Position 조회
+                                updated_position = self._redis_manager.get_position(daily_strategy_id, stock_code)
+
+                                # 5. Kafka 메시지 발행 (확장된 구조)
+                                execution_message = {
+                                    "timestamp": datetime.now().isoformat(),
+                                    "user_strategy_id": user_strategy_id,
+                                    "daily_strategy_id": daily_strategy_id,
+                                    "stock_name": updated_position.get("stock_name", "") if updated_position else "",
+                                    "order_type": "BUY" if is_buy else "SELL",
+                                    "stock_code": stock_code,
+                                    "order_no": order_no,
+                                    "order_quantity": order_quantity,
+                                    "order_price": order_data.get("order_price", 0.0),
+                                    "order_dvsn": order_data.get("order_dvsn", ""),
+                                    "account_no": self.account_no,
+                                    "is_mock": self.is_mock,
+                                    "status": "executed" if is_fully_executed else "partially_executed",
+                                    "executed_quantity": exec_qty,
+                                    "executed_price": exec_price,
+                                    "total_executed_quantity": total_exec_qty,
+                                    "total_executed_price": exec_price,  # 이번 체결 가격
+                                    "remaining_quantity": order_quantity - total_exec_qty,
+                                    "is_fully_executed": is_fully_executed,
+                                    # Position 정보 추가
+                                    "position": {
+                                        "holding_quantity": updated_position.get("holding_quantity", 0) if updated_position else 0,
+                                        "average_price": updated_position.get("average_price", 0.0) if updated_position else 0.0,
+                                        "total_buy_quantity": updated_position.get("total_buy_quantity", 0) if updated_position else 0,
+                                        "total_sell_quantity": updated_position.get("total_sell_quantity", 0) if updated_position else 0,
+                                        "realized_pnl": updated_position.get("realized_pnl", 0.0) if updated_position else 0.0,
+                                    } if updated_position else None,
+                                }
+                                await self._order_signal_producer.send_order_result(execution_message)
+
+                                logger.info(
+                                    f"✅ 체결통보 처리 완료 (Position 기반): "
+                                    f"daily_strategy_id={daily_strategy_id}, "
+                                    f"종목={stock_code}, "
+                                    f"주문번호={order_no}, "
+                                    f"{'매수' if is_buy else '매도'} "
+                                    f"체결수량={exec_qty}, "
+                                    f"체결가격={exec_price:,.0f}, "
+                                    f"누적체결수량={total_exec_qty}, "
+                                    f"전량체결={is_fully_executed}, "
+                                    f"보유수량={updated_position.get('holding_quantity', 0) if updated_position else 0}"
+                                )
+
+                            # 기존 로직 (호환성 유지) - Order가 없는 경우
                             for user_strategy_id in self.user_strategy_ids:
-                                # 전략 타겟에서 해당 종목 찾기
                                 target_data = self._redis_manager.get_strategy_target(user_strategy_id, stock_code)
                                 if target_data:
-                                    # 주문번호 확인 (주문번호가 일치하는 경우에만 처리)
                                     buy_order_no = target_data.get("buy_order_no")
                                     sell_order_no = target_data.get("sell_order_no")
-                                    
+
                                     if (is_buy and buy_order_no == order_no) or (not is_buy and sell_order_no == order_no):
-                                        # 기존 주문 정보 조회 (주문 수량 확인용)
                                         order_quantity = target_data.get(f"{'buy' if is_buy else 'sell'}_quantity", 0)
-                                        
-                                        # 부분 체결 처리 (누적 체결 수량 업데이트)
+
+                                        # 부분 체결 처리 (기존 로직)
                                         self._redis_manager.update_strategy_target_execution(
                                             user_strategy_id=user_strategy_id,
                                             stock_code=stock_code,
@@ -469,61 +552,47 @@ class AccountWebSocketClient:
                                             order_no=order_no,
                                             is_buy=is_buy
                                         )
-                                        
-                                        # 업데이트된 체결 정보 조회
-                                        updated_target = self._redis_manager.get_strategy_target(user_strategy_id, stock_code)
-                                        if updated_target:
-                                            total_exec_quantity = updated_target.get(f"{'buy' if is_buy else 'sell'}_executed_quantity", 0)
-                                            total_exec_price = updated_target.get(f"{'buy' if is_buy else 'sell'}_executed_price", 0.0)
-                                            is_fully_executed = updated_target.get(f"{'buy' if is_buy else 'sell'}_executed", False)
-                                            
-                                            # 체결통보를 Kafka로 발행 (주문 결과 메시지와 동일한 구조로 통합)
-                                            execution_message = {
-                                                "timestamp": datetime.now().isoformat(),
-                                                "user_strategy_id": user_strategy_id,
-                                                "order_type": "BUY" if is_buy else "SELL",
-                                                "stock_code": stock_code,
-                                                "order_no": order_no,
-                                                "order_quantity": order_quantity,
-                                                "order_price": target_data.get(f"{'buy' if is_buy else 'sell'}_price", 0.0),  # 주문 가격
-                                                "order_dvsn": target_data.get("order_dvsn", ""),  # 주문구분 (Redis에 저장되어 있다면)
-                                                "account_no": self.account_no,
-                                                "is_mock": self.is_mock,
-                                                "status": "executed" if is_fully_executed else "partially_executed",
-                                                "executed_quantity": exec_qty,  # 이번 체결 수량
-                                                "executed_price": exec_price,  # 이번 체결 가격
-                                                # 부분 체결 정보 (추가 필드)
-                                                "total_executed_quantity": total_exec_quantity,  # 누적 체결 수량
-                                                "total_executed_price": total_exec_price,  # 누적 체결 가격 (가중평균)
-                                                "remaining_quantity": order_quantity - total_exec_quantity,  # 남은 수량
-                                                "is_fully_executed": is_fully_executed,  # 전량 체결 여부
-                                            }
-                                            await self._order_signal_producer.send_order_result(execution_message)
-                                        
-                                        # 누적 체결 수량 조회를 위한 키 생성
-                                        exec_qty_key = ('buy' if is_buy else 'sell') + '_executed_quantity'
-                                        total_exec_qty = updated_target.get(exec_qty_key, 0) if updated_target else 0
-                                        
+
+                                        # Order가 없었던 경우에만 Kafka 발행 (중복 방지)
+                                        if not order_data:
+                                            updated_target = self._redis_manager.get_strategy_target(user_strategy_id, stock_code)
+                                            if updated_target:
+                                                total_exec_quantity = updated_target.get(f"{'buy' if is_buy else 'sell'}_executed_quantity", 0)
+                                                total_exec_price = updated_target.get(f"{'buy' if is_buy else 'sell'}_executed_price", 0.0)
+                                                is_fully_executed = updated_target.get(f"{'buy' if is_buy else 'sell'}_executed", False)
+
+                                                execution_message = {
+                                                    "timestamp": datetime.now().isoformat(),
+                                                    "user_strategy_id": user_strategy_id,
+                                                    "daily_strategy_id": None,
+                                                    "stock_name": "",
+                                                    "order_type": "BUY" if is_buy else "SELL",
+                                                    "stock_code": stock_code,
+                                                    "order_no": order_no,
+                                                    "order_quantity": order_quantity,
+                                                    "order_price": target_data.get(f"{'buy' if is_buy else 'sell'}_price", 0.0),
+                                                    "order_dvsn": target_data.get("order_dvsn", ""),
+                                                    "account_no": self.account_no,
+                                                    "is_mock": self.is_mock,
+                                                    "status": "executed" if is_fully_executed else "partially_executed",
+                                                    "executed_quantity": exec_qty,
+                                                    "executed_price": exec_price,
+                                                    "total_executed_quantity": total_exec_quantity,
+                                                    "total_executed_price": total_exec_price,
+                                                    "remaining_quantity": order_quantity - total_exec_quantity,
+                                                    "is_fully_executed": is_fully_executed,
+                                                    "position": None,
+                                                }
+                                                await self._order_signal_producer.send_order_result(execution_message)
+
                                         logger.info(
-                                            f"✅ 체결통보 처리 완료: "
+                                            f"✅ 체결통보 처리 완료 (레거시): "
                                             f"전략={user_strategy_id}, "
                                             f"종목={stock_code}, "
-                                            f"주문번호={order_no}, "
                                             f"{'매수' if is_buy else '매도'} "
-                                            f"체결수량={exec_qty}, "
-                                            f"체결가격={exec_price}, "
-                                            f"누적체결수량={total_exec_qty}, "
-                                            f"전량체결={is_fully_executed if updated_target else False}"
+                                            f"체결수량={exec_qty}"
                                         )
-                                    else:
-                                        logger.debug(
-                                            f"주문번호 불일치 또는 해당 전략의 주문 아님: "
-                                            f"전략={user_strategy_id}, "
-                                            f"종목={stock_code}, "
-                                            f"주문번호={order_no}, "
-                                            f"buy_order_no={buy_order_no}, "
-                                            f"sell_order_no={sell_order_no}"
-                                        )
+
                         except (ValueError, TypeError) as e:
                             logger.warning(
                                 f"체결 정보 파싱 실패: "
@@ -540,8 +609,6 @@ class AccountWebSocketClient:
                             f"exec_price={exec_price_str}, "
                             f"exec_qty={exec_qty_str}"
                         )
-                    
-                    # TODO: Kafka 발행 (체결통보 메시지)
             else:
                 # 기타 메시지 (PING, PONG 등)
                 logger.debug(

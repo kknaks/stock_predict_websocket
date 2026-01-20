@@ -4,6 +4,11 @@
 매도 시그널을 받아 실제 주문을 처리합니다.
 - mock 모드: 주문 가정 후 Kafka 발행
 - 실제 모드: KIS API로 실제 주문 전송
+
+Position 및 Order 관리:
+- 매수 주문 시 Position 생성
+- 체결 시 Position 업데이트
+- Kafka 메시지에 daily_strategy_id, position 정보 포함
 """
 
 import json
@@ -37,7 +42,8 @@ class OrderAPI:
         self,
         user_strategy_id: int,
         signal: SignalResult,
-        order_quantity: int = 1
+        order_quantity: int = 1,
+        stock_name: str = ""
     ) -> Dict[str, Any]:
         """
         매수 주문 처리
@@ -46,6 +52,7 @@ class OrderAPI:
             user_strategy_id: 사용자 전략 ID
             signal: 매수 시그널
             order_quantity: 주문 수량 (기본값: 1)
+            stock_name: 종목명 (선택)
 
         Returns:
             주문 처리 결과
@@ -64,10 +71,32 @@ class OrderAPI:
             is_mock = strategy_config.get("is_mock", False)
             user_id = strategy_config.get("user_id")
 
-            # 3. 주문 정보 구성
+            # 2. daily_strategy_id 조회 (없으면 생성)
+            daily_strategy_id = self._redis_manager.get_daily_strategy_id(user_strategy_id)
+            if not daily_strategy_id:
+                daily_strategy_id = self._redis_manager.generate_daily_strategy_id()
+                self._redis_manager.save_daily_strategy(
+                    daily_strategy_id=daily_strategy_id,
+                    user_strategy_id=user_strategy_id,
+                    data={"is_mock": is_mock, "user_id": user_id}
+                )
+                logger.info(
+                    f"New daily_strategy_id generated: {daily_strategy_id} "
+                    f"for user_strategy_id={user_strategy_id}"
+                )
+
+            # 3. Position 생성 (없으면)
             stock_code = signal.stock_code
+            position = self._redis_manager.create_position_if_not_exists(
+                daily_strategy_id=daily_strategy_id,
+                user_strategy_id=user_strategy_id,
+                stock_code=stock_code,
+                stock_name=stock_name
+            )
+
+            # 4. 주문 정보 구성
             order_price = int(signal.recommended_order_price)
-            
+
             # 주문 구분 코드 변환
             # 00: 지정가, 01: 시장가, 02: 조건부지정가, 03: 최유리지정가, 05: 장전시간외종가, 06: 장후시간외종가
             if signal.recommended_order_type == OrderType.LIMIT:
@@ -77,57 +106,107 @@ class OrderAPI:
             else:
                 ord_dvsn = "00"  # 기본값: 지정가
 
-            # 4. 주문 실행
+            # 5. Order 생성 및 저장
+            order_id = str(uuid.uuid4())
+            order_data = {
+                "order_id": order_id,
+                "daily_strategy_id": daily_strategy_id,
+                "user_strategy_id": user_strategy_id,
+                "stock_code": stock_code,
+                "order_type": "BUY",
+                "order_quantity": order_quantity,
+                "order_price": order_price,
+                "order_dvsn": ord_dvsn,
+                "status": "pending",
+                "executed_quantity": 0,
+                "executed_price": 0.0,
+                "remaining_quantity": order_quantity,
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
+            }
+            self._redis_manager.save_order(order_data)
+
+            # 6. 주문 실행
             if is_mock:
                 # Mock 모드: 계좌 정보 없이 주문 가정
                 # Mock 모드에서 주문번호 생성 (타임스탬프 기반 고유 ID)
                 mock_order_no = f"MOCK-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"
-                
+
                 logger.info(
                     f"[MOCK] 매수 주문 가정: "
                     f"전략={user_strategy_id}, "
+                    f"daily_strategy_id={daily_strategy_id}, "
                     f"종목={stock_code}, "
                     f"수량={order_quantity}, "
                     f"가격={order_price}, "
                     f"주문구분={ord_dvsn}, "
                     f"주문번호={mock_order_no}"
                 )
-                
+
+                # Order 상태 업데이트 (체결 완료)
+                self._redis_manager.update_order_status(
+                    order_id=order_id,
+                    status="filled",
+                    order_no=mock_order_no,
+                    executed_quantity=order_quantity,
+                    executed_price=order_price
+                )
+
+                # Position 업데이트 (매수 체결)
+                self._redis_manager.update_position_buy(
+                    daily_strategy_id=daily_strategy_id,
+                    stock_code=stock_code,
+                    exec_qty=order_quantity,
+                    exec_price=order_price
+                )
+
+                # 업데이트된 Position 조회
+                updated_position = self._redis_manager.get_position(daily_strategy_id, stock_code)
+
                 # Kafka로 주문 결과 발행 (체결되었다고 가정)
                 mock_order_result = {
                     "timestamp": datetime.now().isoformat(),
                     "user_strategy_id": user_strategy_id,
+                    "daily_strategy_id": daily_strategy_id,  # 신규 추가
+                    "stock_name": stock_name,  # 신규 추가
                     "order_type": "BUY",
                     "stock_code": stock_code,
-                    "order_no": mock_order_no,  # Mock 주문번호
+                    "order_no": mock_order_no,
                     "order_quantity": order_quantity,
                     "order_price": order_price,
                     "order_dvsn": ord_dvsn,
-                    "account_no": "MOCK",  # Mock 모드에서는 계좌번호 불필요
+                    "account_no": "MOCK",
                     "is_mock": True,
-                    "status": "executed",  # 체결되었다고 가정
-                    "executed_quantity": order_quantity,  # Mock 모드: 100% 체결
+                    "status": "executed",
+                    "executed_quantity": order_quantity,
                     "executed_price": order_price,
-                    # 부분 체결 정보 (Mock 모드: 100% 체결 가정)
                     "total_executed_quantity": order_quantity,
                     "total_executed_price": order_price,
                     "remaining_quantity": 0,
                     "is_fully_executed": True,
+                    # Position 정보 추가
+                    "position": {
+                        "holding_quantity": updated_position.get("holding_quantity", order_quantity) if updated_position else order_quantity,
+                        "average_price": updated_position.get("average_price", order_price) if updated_position else order_price,
+                        "total_buy_quantity": updated_position.get("total_buy_quantity", order_quantity) if updated_position else order_quantity,
+                        "total_sell_quantity": updated_position.get("total_sell_quantity", 0) if updated_position else 0,
+                        "realized_pnl": updated_position.get("realized_pnl", 0.0) if updated_position else 0.0,
+                    } if updated_position else None,
                 }
-                
-                # 주문 결과를 Kafka로 발행 (주문번호 포함)
+
+                # 주문 결과를 Kafka로 발행
                 await self._order_signal_producer.send_order_result(mock_order_result)
-                
-                # 전략 타겟에 매수 정보 업데이트 (Mock 모드: 100% 체결 가정)
+
+                # 전략 타겟에 매수 정보 업데이트 (기존 호환성 유지)
                 self._redis_manager.update_strategy_target_buy(
                     user_strategy_id=user_strategy_id,
                     stock_code=stock_code,
                     buy_quantity=order_quantity,
                     buy_price=order_price,
-                    order_no=mock_order_no,  # Mock 주문번호 저장
-                    executed=True  # Mock 모드: 100% 체결 가정
+                    order_no=mock_order_no,
+                    executed=True
                 )
-                
+
                 logger.info(f"[MOCK] 매수 주문 처리 완료: {stock_code}")
 
                 # Slack 알림 전송
@@ -140,6 +219,8 @@ class OrderAPI:
                 return {
                     "success": True,
                     "is_mock": True,
+                    "daily_strategy_id": daily_strategy_id,
+                    "order_id": order_id,
                     "result": mock_order_result
                 }
             else:
@@ -193,14 +274,24 @@ class OrderAPI:
                     logger.info(
                         f"매수 주문 성공: "
                         f"전략={user_strategy_id}, "
+                        f"daily_strategy_id={daily_strategy_id}, "
                         f"종목={stock_code}, "
                         f"주문번호={order_no}"
                     )
-                    
+
+                    # Order 상태 업데이트 (주문 접수됨)
+                    self._redis_manager.update_order_status(
+                        order_id=order_id,
+                        status="ordered",
+                        order_no=order_no
+                    )
+
                     # Kafka로 주문 결과 발행 (주문번호 포함)
                     order_result_message = {
                         "timestamp": datetime.now().isoformat(),
                         "user_strategy_id": user_strategy_id,
+                        "daily_strategy_id": daily_strategy_id,  # 신규 추가
+                        "stock_name": stock_name,  # 신규 추가
                         "order_type": "BUY",
                         "stock_code": stock_code,
                         "order_no": order_no,
@@ -209,30 +300,32 @@ class OrderAPI:
                         "order_dvsn": ord_dvsn,
                         "account_no": account_no,
                         "is_mock": False,
-                        "status": "ordered",  # 주문 성공 (체결 대기)
-                        "executed_quantity": 0,  # 아직 체결 안 됨
+                        "status": "ordered",
+                        "executed_quantity": 0,
                         "executed_price": 0.0,
-                        # 부분 체결 정보 (주문 시점에는 0)
                         "total_executed_quantity": 0,
                         "total_executed_price": 0.0,
                         "remaining_quantity": order_quantity,
                         "is_fully_executed": False,
+                        "position": None,  # 체결 시 업데이트됨
                     }
                     await self._order_signal_producer.send_order_result(order_result_message)
-                    
-                    # 전략 타겟에 매수 주문 정보 업데이트 (실제 모드: 주문 성공만, 체결은 체결 통보에서 처리)
+
+                    # 전략 타겟에 매수 주문 정보 업데이트 (기존 호환성 유지)
                     self._redis_manager.update_strategy_target_buy(
                         user_strategy_id=user_strategy_id,
                         stock_code=stock_code,
                         buy_quantity=order_quantity,
                         buy_price=order_price,
                         order_no=order_no,
-                        executed=False  # 실제 모드: 주문만 성공, 체결은 체결 통보에서 처리
+                        executed=False
                     )
-                    
+
                     return {
                         "success": True,
                         "is_mock": False,
+                        "daily_strategy_id": daily_strategy_id,
+                        "order_id": order_id,
                         "result": order_result
                     }
                 else:
@@ -365,7 +458,8 @@ class OrderAPI:
         self,
         user_strategy_id: int,
         signal: SignalResult,
-        order_quantity: int = 1
+        order_quantity: int = 1,
+        stock_name: str = ""
     ) -> Dict[str, Any]:
         """
         매도 주문 처리
@@ -374,6 +468,7 @@ class OrderAPI:
             user_strategy_id: 사용자 전략 ID
             signal: 매도 시그널
             order_quantity: 주문 수량 (기본값: 1)
+            stock_name: 종목명 (선택)
 
         Returns:
             주문 처리 결과
@@ -392,10 +487,45 @@ class OrderAPI:
             is_mock = strategy_config.get("is_mock", False)
             user_id = strategy_config.get("user_id")
 
-            # 3. 주문 정보 구성
+            # 2. daily_strategy_id 조회
+            daily_strategy_id = self._redis_manager.get_daily_strategy_id(user_strategy_id)
+            if not daily_strategy_id:
+                error_msg = f"daily_strategy_id를 찾을 수 없습니다: user_strategy_id={user_strategy_id}"
+                logger.error(error_msg)
+                return {
+                    "success": False,
+                    "error": error_msg
+                }
+
+            # 3. Position 확인 (보유 수량 검증)
             stock_code = signal.stock_code
+            position = self._redis_manager.get_position(daily_strategy_id, stock_code)
+
+            if not position:
+                error_msg = f"Position을 찾을 수 없습니다: daily_strategy_id={daily_strategy_id}, stock_code={stock_code}"
+                logger.warning(error_msg)
+                # Position이 없어도 주문은 진행 (기존 호환성)
+
+            holding_quantity = position.get("holding_quantity", 0) if position else 0
+
+            # 보유 수량 검증 (Mock 모드가 아닌 경우만)
+            if not is_mock and holding_quantity <= 0:
+                error_msg = f"보유 수량이 없습니다: daily_strategy_id={daily_strategy_id}, stock_code={stock_code}"
+                logger.warning(error_msg)
+                return {
+                    "success": False,
+                    "error": error_msg
+                }
+
+            # 실제 매도 수량 결정 (보유 수량과 비교)
+            if holding_quantity > 0:
+                actual_sell_quantity = min(order_quantity, holding_quantity)
+            else:
+                actual_sell_quantity = order_quantity
+
+            # 4. 주문 정보 구성
             order_price = int(signal.recommended_order_price)
-            
+
             # 주문 구분 코드 변환
             # 00: 지정가, 01: 시장가, 02: 조건부지정가, 03: 최유리지정가, 05: 장전시간외종가, 06: 장후시간외종가
             if signal.recommended_order_type == OrderType.LIMIT:
@@ -405,69 +535,128 @@ class OrderAPI:
             else:
                 ord_dvsn = "00"  # 기본값: 지정가
 
-            # 4. 주문 실행
+            # 시장가 주문의 경우 주문 단가는 "0"
+            if ord_dvsn == "01":
+                order_price = 0
+
+            # 5. Order 생성 및 저장
+            order_id = str(uuid.uuid4())
+            order_data = {
+                "order_id": order_id,
+                "daily_strategy_id": daily_strategy_id,
+                "user_strategy_id": user_strategy_id,
+                "stock_code": stock_code,
+                "order_type": "SELL",
+                "order_quantity": actual_sell_quantity,
+                "order_price": order_price,
+                "order_dvsn": ord_dvsn,
+                "status": "pending",
+                "executed_quantity": 0,
+                "executed_price": 0.0,
+                "remaining_quantity": actual_sell_quantity,
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
+            }
+            self._redis_manager.save_order(order_data)
+
+            # 6. 주문 실행
             if is_mock:
                 # Mock 모드: 계좌 정보 없이 주문 가정
                 # Mock 모드에서 주문번호 생성 (타임스탬프 기반 고유 ID)
                 mock_order_no = f"MOCK-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"
-                
+
+                # 체결 가격 결정 (시장가인 경우 현재가 사용)
+                exec_price = order_price if order_price > 0 else int(signal.current_price)
+
                 logger.info(
                     f"[MOCK] 매도 주문 가정: "
                     f"전략={user_strategy_id}, "
+                    f"daily_strategy_id={daily_strategy_id}, "
                     f"종목={stock_code}, "
-                    f"수량={order_quantity}, "
-                    f"가격={order_price}, "
+                    f"수량={actual_sell_quantity}, "
+                    f"가격={exec_price}, "
                     f"주문구분={ord_dvsn}, "
                     f"주문번호={mock_order_no}"
                 )
-                
+
+                # Order 상태 업데이트 (체결 완료)
+                self._redis_manager.update_order_status(
+                    order_id=order_id,
+                    status="filled",
+                    order_no=mock_order_no,
+                    executed_quantity=actual_sell_quantity,
+                    executed_price=exec_price
+                )
+
+                # Position 업데이트 (매도 체결)
+                self._redis_manager.update_position_sell(
+                    daily_strategy_id=daily_strategy_id,
+                    stock_code=stock_code,
+                    exec_qty=actual_sell_quantity,
+                    exec_price=exec_price
+                )
+
+                # 업데이트된 Position 조회
+                updated_position = self._redis_manager.get_position(daily_strategy_id, stock_code)
+
                 # Kafka로 주문 결과 발행 (체결되었다고 가정)
                 mock_order_result = {
                     "timestamp": datetime.now().isoformat(),
                     "user_strategy_id": user_strategy_id,
+                    "daily_strategy_id": daily_strategy_id,  # 신규 추가
+                    "stock_name": stock_name,  # 신규 추가
                     "order_type": "SELL",
                     "stock_code": stock_code,
-                    "order_no": mock_order_no,  # Mock 주문번호
-                    "order_quantity": order_quantity,
-                    "order_price": order_price,
+                    "order_no": mock_order_no,
+                    "order_quantity": actual_sell_quantity,
+                    "order_price": exec_price,
                     "order_dvsn": ord_dvsn,
-                    "account_no": "MOCK",  # Mock 모드에서는 계좌번호 불필요
+                    "account_no": "MOCK",
                     "is_mock": True,
-                    "status": "executed",  # 체결되었다고 가정
-                    "executed_quantity": order_quantity,  # Mock 모드: 100% 체결
-                    "executed_price": order_price,
-                    # 부분 체결 정보 (Mock 모드: 100% 체결 가정)
-                    "total_executed_quantity": order_quantity,
-                    "total_executed_price": order_price,
+                    "status": "executed",
+                    "executed_quantity": actual_sell_quantity,
+                    "executed_price": exec_price,
+                    "total_executed_quantity": actual_sell_quantity,
+                    "total_executed_price": exec_price,
                     "remaining_quantity": 0,
                     "is_fully_executed": True,
+                    # Position 정보 추가
+                    "position": {
+                        "holding_quantity": updated_position.get("holding_quantity", 0) if updated_position else 0,
+                        "average_price": updated_position.get("average_price", 0) if updated_position else 0,
+                        "total_buy_quantity": updated_position.get("total_buy_quantity", 0) if updated_position else 0,
+                        "total_sell_quantity": updated_position.get("total_sell_quantity", actual_sell_quantity) if updated_position else actual_sell_quantity,
+                        "realized_pnl": updated_position.get("realized_pnl", 0.0) if updated_position else 0.0,
+                    } if updated_position else None,
                 }
-                
-                # 주문 결과를 Kafka로 발행 (주문번호 포함)
+
+                # 주문 결과를 Kafka로 발행
                 await self._order_signal_producer.send_order_result(mock_order_result)
-                
-                # 전략 타겟에 매도 정보 업데이트 (Mock 모드: 100% 체결 가정)
+
+                # 전략 타겟에 매도 정보 업데이트 (기존 호환성 유지)
                 self._redis_manager.update_strategy_target_sell(
                     user_strategy_id=user_strategy_id,
                     stock_code=stock_code,
-                    sell_quantity=order_quantity,
-                    sell_price=order_price,
-                    order_no=mock_order_no,  # Mock 주문번호 저장
-                    executed=True  # Mock 모드: 100% 체결 가정
+                    sell_quantity=actual_sell_quantity,
+                    sell_price=exec_price,
+                    order_no=mock_order_no,
+                    executed=True
                 )
-                
+
                 logger.info(f"[MOCK] 매도 주문 처리 완료: {stock_code}")
 
                 # Slack 알림 전송
                 await send_slack(
                     f"[MOCK 매도 체결] {stock_code} | "
-                    f"{order_quantity}주 @ {order_price:,}원 | "
+                    f"{actual_sell_quantity}주 @ {exec_price:,}원 | "
                     f"매도 사유 : {signal.reason}"
                 )
 
                 return {
                     "success": True,
                     "is_mock": True,
+                    "daily_strategy_id": daily_strategy_id,
+                    "order_id": order_id,
                     "result": mock_order_result
                 }
             else:
@@ -512,7 +701,7 @@ class OrderAPI:
                     access_token=access_token,
                     stock_code=stock_code,
                     ord_dvsn=ord_dvsn,
-                    ord_qty=str(order_quantity),
+                    ord_qty=str(actual_sell_quantity),
                     ord_unpr=str(order_price)
                 )
 
@@ -521,46 +710,58 @@ class OrderAPI:
                     logger.info(
                         f"매도 주문 성공: "
                         f"전략={user_strategy_id}, "
+                        f"daily_strategy_id={daily_strategy_id}, "
                         f"종목={stock_code}, "
                         f"주문번호={order_no}"
                     )
-                    
+
+                    # Order 상태 업데이트 (주문 접수됨)
+                    self._redis_manager.update_order_status(
+                        order_id=order_id,
+                        status="ordered",
+                        order_no=order_no
+                    )
+
                     # Kafka로 주문 결과 발행 (주문번호 포함)
                     order_result_message = {
                         "timestamp": datetime.now().isoformat(),
                         "user_strategy_id": user_strategy_id,
+                        "daily_strategy_id": daily_strategy_id,  # 신규 추가
+                        "stock_name": stock_name,  # 신규 추가
                         "order_type": "SELL",
                         "stock_code": stock_code,
                         "order_no": order_no,
-                        "order_quantity": order_quantity,
+                        "order_quantity": actual_sell_quantity,
                         "order_price": order_price,
                         "order_dvsn": ord_dvsn,
                         "account_no": account_no,
                         "is_mock": False,
-                        "status": "ordered",  # 주문 성공 (체결 대기)
-                        "executed_quantity": 0,  # 아직 체결 안 됨
+                        "status": "ordered",
+                        "executed_quantity": 0,
                         "executed_price": 0.0,
-                        # 부분 체결 정보 (주문 시점에는 0)
                         "total_executed_quantity": 0,
                         "total_executed_price": 0.0,
-                        "remaining_quantity": order_quantity,
+                        "remaining_quantity": actual_sell_quantity,
                         "is_fully_executed": False,
+                        "position": None,  # 체결 시 업데이트됨
                     }
                     await self._order_signal_producer.send_order_result(order_result_message)
-                    
-                    # 전략 타겟에 매도 주문 정보 업데이트 (실제 모드: 주문 성공만, 체결은 체결 통보에서 처리)
+
+                    # 전략 타겟에 매도 주문 정보 업데이트 (기존 호환성 유지)
                     self._redis_manager.update_strategy_target_sell(
                         user_strategy_id=user_strategy_id,
                         stock_code=stock_code,
-                        sell_quantity=order_quantity,
+                        sell_quantity=actual_sell_quantity,
                         sell_price=order_price,
                         order_no=order_no,
-                        executed=False  # 실제 모드: 주문만 성공, 체결은 체결 통보에서 처리
+                        executed=False
                     )
-                    
+
                     return {
                         "success": True,
                         "is_mock": False,
+                        "daily_strategy_id": daily_strategy_id,
+                        "order_id": order_id,
                         "result": order_result
                     }
                 else:

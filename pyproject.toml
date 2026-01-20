@@ -19,6 +19,7 @@ httpx = "^0.24.0"
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
 pytest-asyncio = "^0.24.0"
+fakeredis = "^2.33.0"
 
 [build-system]
 requires = ["poetry-core"]

@@ -349,10 +349,10 @@ class SlippageCalculator:
         if slippage <= self.SLIPPAGE_THRESHOLD_MEDIUM:
             return OrderType.LIMIT, best_ask
 
-        # 슬리피지가 높으면 현재가 + 1틱으로 지정가 (체결 확률과 슬리피지 균형)
-        # 또는 여러 호가 단계 필요하면 분할 주문 추천
+        # 슬리피지가 높으면 분할 주문 추천
+        # 분할 주문 시 best_ask 사용 (체결 확률 높임)
         if depth_analysis.get('levels_needed', 1) > 2:
-            return OrderType.SPLIT, current_price
+            return OrderType.SPLIT, best_ask
 
         return OrderType.LIMIT, best_ask
 
@@ -378,8 +378,9 @@ class SlippageCalculator:
             return OrderType.LIMIT, best_bid
 
         # 슬리피지가 높으면 분할 주문 추천
+        # 분할 주문 시 best_bid 사용 (체결 확률 높임)
         if depth_analysis.get('levels_needed', 1) > 2:
-            return OrderType.SPLIT, current_price
+            return OrderType.SPLIT, best_bid
 
         return OrderType.LIMIT, best_bid
 

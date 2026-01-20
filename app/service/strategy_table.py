@@ -432,10 +432,11 @@ class StrategyTable:
             if strategy_config.strategy_weight_type == "MARKETCAP":
                 total_market_cap = sum(p.market_cap for p in available_predictions)
             elif strategy_config.strategy_weight_type == "PRICE":
-                total_price = sum(p.stock_open for p in available_predictions)
+                # 역가중치: 시가가 낮을수록 비중 높음
+                total_inverse_price = sum(1.0 / float(p.stock_open) for p in available_predictions if float(p.stock_open) > 0)
             else:
                 total_market_cap = 0
-                total_price = 0
+                total_inverse_price = 0
             
             for prediction in available_predictions:
                 try:
@@ -449,8 +450,10 @@ class StrategyTable:
                         else:
                             weight = 1.0 / len(available_predictions)
                     elif strategy_config.strategy_weight_type == "PRICE":
-                        if total_price > 0:
-                            weight = prediction.stock_open / total_price
+                        # 역가중치: 시가가 낮을수록 비중 높음
+                        stock_open = float(prediction.stock_open)
+                        if total_inverse_price > 0 and stock_open > 0:
+                            weight = (1.0 / stock_open) / total_inverse_price
                         else:
                             weight = 1.0 / len(available_predictions)
                     else:
