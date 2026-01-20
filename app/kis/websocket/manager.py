@@ -521,8 +521,9 @@ class WebSocketManager:
                 logger.error(f"Error stopping price websocket: {e}", exc_info=True)
             finally:
                 self._price_client = None
-                # Redis에서 연결 정보 삭제 (이중 확인)
-                self._redis_manager.delete_price_connection()
+        
+        # Redis에서 연결 정보 삭제 (항상 실행 - _price_client가 None이어도 Redis에 정보가 남아있을 수 있음)
+        self._redis_manager.delete_price_connection()
 
     async def _stop_account_websockets(self, target: str) -> None:
         """계좌 웹소켓들 종료"""
