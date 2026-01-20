@@ -543,8 +543,9 @@ class WebSocketManager:
                     logger.error(f"Error stopping account websocket {account_no}: {e}", exc_info=True)
                 finally:
                     del self._account_clients[account_no]
-                    # Redis에서 연결 정보 삭제 (이중 확인)
-                    self._redis_manager.delete_account_connection(account_no)
+            
+            # Redis에서 연결 정보 삭제 (항상 실행 - client가 None이어도 Redis에 정보가 남아있을 수 있음)
+            self._redis_manager.delete_account_connection(account_no)
 
     async def update_price_stocks(self, new_stocks: List[str]) -> bool:
         """
