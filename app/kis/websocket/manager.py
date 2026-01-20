@@ -262,6 +262,31 @@ class WebSocketManager:
     async def _start_price_websocket(self, tokens: TokenInfo, config: StartConfig) -> None:
         """가격 웹소켓 시작"""
         try:
+            # Redis에서 기존 연결 정보 확인
+            existing_connection = self._redis_manager.get_price_connection()
+            if existing_connection:
+                existing_appkey = existing_connection.get("appkey")
+                existing_status = existing_connection.get("status", "unknown")
+                
+                # 같은 appkey가 이미 사용 중이면 에러 발생
+                if existing_appkey == config.appkey and existing_status == "connected":
+                    error_msg = (
+                        f"Price websocket already in use with appkey: {config.appkey}. "
+                        f"Please stop existing connection first."
+                    )
+                    logger.error(error_msg)
+                    raise WebSocketConnectionError(
+                        error_msg,
+                        details={"appkey": config.appkey, "existing_status": existing_status}
+                    )
+                elif existing_appkey == config.appkey:
+                    # 연결이 끊어진 상태면 Redis에서 삭제하고 계속 진행
+                    logger.warning(
+                        f"Found disconnected connection for appkey {config.appkey}, "
+                        f"cleaning up Redis entry"
+                    )
+                    self._redis_manager.delete_price_connection()
+            
             logger.info(f"Starting price websocket for {len(config.stocks)} stocks")
             self._price_client = PriceWebSocketClient(
                 ws_token=tokens.ws_token,
@@ -390,6 +415,39 @@ class WebSocketManager:
                         logger.info(f"Account websocket disconnected: {account.account_no} (user_id: {user.user_id}), restarting")
                         del self._account_clients[account.account_no]
                 
+                # Redis에서 기존 연결 정보 확인
+                existing_connection = self._redis_manager.get_account_connection(account.account_no)
+                if existing_connection:
+                    existing_appkey = existing_connection.get("appkey")
+                    existing_status = existing_connection.get("status", "unknown")
+                    
+                    # 같은 appkey가 이미 사용 중이면 에러 발생
+                    if existing_appkey == account.app_key and existing_status == "connected":
+                        error_msg = (
+                            f"Account websocket already in use: account_no={account.account_no}, "
+                            f"appkey={account.app_key}. Please stop existing connection first."
+                        )
+                        logger.error(error_msg)
+                        self._error_stats.record_error(
+                            WebSocketConnectionError(
+                                error_msg,
+                                details={"account_no": account.account_no, "appkey": account.app_key, "existing_status": existing_status}
+                            ),
+                            error_type=None,
+                            error_code=None,
+                            details={"account_no": account.account_no, "user_id": user.user_id}
+                        )
+                        self._failed_accounts.append(account.account_no)
+                        failure_count += 1
+                        continue
+                    elif existing_appkey == account.app_key:
+                        # 연결이 끊어진 상태면 Redis에서 삭제하고 계속 진행
+                        logger.warning(
+                            f"Found disconnected connection for account {account.account_no}, "
+                            f"cleaning up Redis entry"
+                        )
+                        self._redis_manager.delete_account_connection(account.account_no)
+                
                 try:
                     # user의 strategies에서 user_strategy_id 리스트 추출
                     user_strategy_ids = [s.get("user_strategy_id") for s in user.strategies if s.get("user_strategy_id")]
@@ -463,6 +521,8 @@ class WebSocketManager:
                 logger.error(f"Error stopping price websocket: {e}", exc_info=True)
             finally:
                 self._price_client = None
+                # Redis에서 연결 정보 삭제 (이중 확인)
+                self._redis_manager.delete_price_connection()
 
     async def _stop_account_websockets(self, target: str) -> None:
         """계좌 웹소켓들 종료"""
@@ -482,6 +542,8 @@ class WebSocketManager:
                     logger.error(f"Error stopping account websocket {account_no}: {e}", exc_info=True)
                 finally:
                     del self._account_clients[account_no]
+                    # Redis에서 연결 정보 삭제 (이중 확인)
+                    self._redis_manager.delete_account_connection(account_no)
 
     async def update_price_stocks(self, new_stocks: List[str]) -> bool:
         """
