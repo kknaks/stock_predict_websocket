@@ -82,11 +82,13 @@ class PriceWebSocketClient:
         if self._reconnect_attempts > 0:
             await self._load_from_redis()
 
-        while self._reconnect_attempts < self._max_reconnect_attempts:
+        while self._reconnect_attempts < self._max_reconnect_attempts and self._running:
             try:
                 await self._connect()
                 await self._subscribe()
                 await self._run()
+                # _run()이 정상 종료된 경우 (예외 없이) 루프 종료
+                break
             except websockets.ConnectionClosed as e:
                 logger.warning("WebSocket connection closed")
                 self._error_stats.record_error(
