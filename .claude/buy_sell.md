@@ -69,8 +69,8 @@ class StrategyConfig:
 # 목표가 = 시가 * (1 + take_profit_target / 100)
 target_price = stock_open * (1 + take_profit_target / 100)
 
-# 매도가 = 시가 * (1 + take_profit_target * tp_ratio / 100)
-sell_price = stock_open * (1 + take_profit_target * tp_ratio / 100)
+# 목표 매도가 = 시가 * (1 + take_profit_target * tp_ratio / 100)
+target_sell_price = stock_open * (1 + take_profit_target * tp_ratio / 100)
 
 # 손절가 = 시가 * (1 + ls_ratio / 100)
 stop_loss_price = stock_open * (1 + ls_ratio / 100)
@@ -93,7 +93,7 @@ class TargetPrice:
     exchange: str
     stock_open: float         # 시가
     target_price: float       # 목표가
-    sell_price: float         # 매도가 (익절)
+    target_sell_price: float  # 목표 매도가 (익절)
     stop_loss_price: float    # 손절가
     gap_rate: float
     take_profit_target: float
@@ -136,7 +136,7 @@ if price_diff_pct >= 1.0:
 # 3. 목표가 데이터 존재
 
 # 매도 시그널 생성 시 조건 (signal_generator에서):
-# - current_price >= sell_price (익절)
+# - current_price >= target_sell_price (익절)
 # - current_price <= stop_loss_price (손절)
 ```
 
@@ -188,7 +188,7 @@ if signal_key in self._generated_signals:
     "exchange": "KOSPI",
     "stock_open": 70000,
     "target_price": 72100,
-    "sell_price": 71680,
+    "target_sell_price": 71680,
     "stop_loss_price": 69300,
     "gap_rate": 1.5,
     "take_profit_target": 3.0,

@@ -98,7 +98,7 @@
     "exchange": "KRX",
     "stock_open": 75000.0,
     "target_price": 82500.0,
-    "sell_price": 81000.0,
+    "target_sell_price": 81000.0,
     "stop_loss_price": 74250.0,
     "gap_rate": 2.5,
     "take_profit_target": 10.0,

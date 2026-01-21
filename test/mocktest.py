@@ -275,7 +275,7 @@ async def test_2_prediction():
             logger.info(
                 f"  {stock_code}: 시가={target_data.get('stock_open')}, "
                 f"목표가={target_data.get('target_price'):.0f}, "
-                f"매도가={target_data.get('sell_price'):.0f}, "
+                f"목표매도가={target_data.get('target_sell_price'):.0f}, "
                 f"손절가={target_data.get('stop_loss_price'):.0f}, "
                 f"수량={target_data.get('target_quantity')}"
             )
@@ -433,7 +433,7 @@ async def test_6_sell_signal():
     signal_executor._last_signal_check.clear()
     signal_executor._last_prices.clear()
 
-    # 삼성전자 매도 조건: 매도가(sell_price) 도달
+    # 삼성전자 매도 조건: 목표매도가(target_sell_price) 도달
     # 시가 70,000 * (1 + 3.0 * 0.8 / 100) = 71,680원
     stock_code = "005930"
     current_price = 71700  # 매도가 71,680원 초과

@@ -256,7 +256,7 @@ class SignalExecutor:
                     stock_code=stock_code,
                     price_data=price_data,
                     asking_price_data=asking_price_data,
-                    target_price=target.sell_price,
+                    target_price=target.target_sell_price,
                     stop_loss_price=target.stop_loss_price,
                     order_quantity=holding_quantity  # Position의 보유 수량 사용
                 )

@@ -41,7 +41,7 @@ class TargetPrice:
     exchange: str
     stock_open: float  # 시가
     target_price: float  # 목표가 (take_profit_target 기준)
-    sell_price: float  # 매도가 (tp_ratio 적용)
+    target_sell_price: float  # 목표 매도가 (tp_ratio 적용)
     stop_loss_price: float  # 손절가 (ls_ratio 적용)
     gap_rate: float  # 갭률
     take_profit_target: float  # 익절 목표 수익률 (%)
@@ -129,9 +129,9 @@ class StrategyTable:
 
         # 목표가 = 시가 * (1 + take_profit_target / 100)
         target_price = stock_open * (1 + take_profit_target / 100)
-        # 매도가 = 시가 * (1 + take_profit_target * tp_ratio / 100)
+        # 목표 매도가 = 시가 * (1 + take_profit_target * tp_ratio / 100)
         # tp_ratio만큼 수익 시 매도 (예: 0.8이면 80% 수익 시 매도)
-        sell_price = stock_open * (1 + take_profit_target * tp_ratio / 100)
+        target_sell_price = stock_open * (1 + take_profit_target * tp_ratio / 100)
 
         # 손절가 = 시가 * (1 + ls_ratio / 100)
         # ls_ratio는 음수 (예: -1이면 -1% 손절)
@@ -154,7 +154,7 @@ class StrategyTable:
             exchange=prediction.exchange,
             stock_open=stock_open,
             target_price=target_price,
-            sell_price=sell_price,
+            target_sell_price=target_sell_price,
             stop_loss_price=stop_loss_price,
             gap_rate=prediction.gap_rate,
             take_profit_target=take_profit_target,
@@ -194,7 +194,7 @@ class StrategyTable:
             "exchange": target_price.exchange,
             "stock_open": target_price.stock_open,
             "target_price": target_price.target_price,
-            "sell_price": target_price.sell_price,
+            "target_sell_price": target_price.target_sell_price,
             "stop_loss_price": target_price.stop_loss_price,
             "gap_rate": target_price.gap_rate,
             "take_profit_target": target_price.take_profit_target,
@@ -214,7 +214,7 @@ class StrategyTable:
             f"Updated target price for strategy={user_strategy_id}, "
             f"stock={target_price.stock_code}({target_price.stock_name}): "
             f"target={target_price.target_price:.2f}, "
-            f"sell={target_price.sell_price:.2f}, "
+            f"target_sell={target_price.target_sell_price:.2f}, "
             f"stop_loss={target_price.stop_loss_price:.2f}"
         )
 
@@ -260,7 +260,7 @@ class StrategyTable:
                             exchange=data["exchange"],
                             stock_open=float(data["stock_open"]),
                             target_price=float(data["target_price"]),
-                            sell_price=float(data["sell_price"]),
+                            target_sell_price=float(data.get("target_sell_price", data.get("sell_price", 0))),
                             stop_loss_price=float(data["stop_loss_price"]),
                             gap_rate=float(data["gap_rate"]),
                             take_profit_target=float(data["take_profit_target"]),
@@ -285,7 +285,7 @@ class StrategyTable:
                         exchange=redis_data["exchange"],
                         stock_open=float(redis_data["stock_open"]),
                         target_price=float(redis_data["target_price"]),
-                        sell_price=float(redis_data["sell_price"]),
+                        target_sell_price=float(redis_data.get("target_sell_price", redis_data.get("sell_price", 0))),
                         stop_loss_price=float(redis_data["stop_loss_price"]),
                         gap_rate=float(redis_data["gap_rate"]),
                         take_profit_target=float(redis_data["take_profit_target"]),
@@ -500,7 +500,7 @@ class StrategyTable:
                                 "exchange": target_price.exchange,
                                 "stock_open": target_price.stock_open,
                                 "target_price": target_price.target_price,
-                                "sell_price": target_price.sell_price,
+                                "target_sell_price": target_price.target_sell_price,
                                 "stop_loss_price": target_price.stop_loss_price,
                                 "gap_rate": target_price.gap_rate,
                                 "take_profit_target": target_price.take_profit_target,
@@ -552,7 +552,7 @@ class StrategyTable:
                         exchange=redis_data["exchange"],
                         stock_open=float(redis_data["stock_open"]),
                         target_price=float(redis_data["target_price"]),
-                        sell_price=float(redis_data["sell_price"]),
+                        target_sell_price=float(redis_data.get("target_sell_price", redis_data.get("sell_price", 0))),
                         stop_loss_price=float(redis_data["stop_loss_price"]),
                         gap_rate=float(redis_data["gap_rate"]),
                         take_profit_target=float(redis_data["take_profit_target"]),
@@ -606,10 +606,10 @@ class StrategyTable:
         return {
             "has_target": True,
             "reached_target": current_price >= target.target_price,
-            "reached_sell": current_price >= target.sell_price,
+            "reached_sell": current_price >= target.target_sell_price,
             "reached_stop_loss": current_price <= target.stop_loss_price,
             "target_price": target.target_price,
-            "sell_price": target.sell_price,
+            "target_sell_price": target.target_sell_price,
             "stop_loss_price": target.stop_loss_price,
             "current_price": current_price
         }
