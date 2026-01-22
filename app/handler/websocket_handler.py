@@ -174,6 +174,9 @@ class WebSocketHandler:
                         exc_info=True
                     )
 
+            # 3. 메모리 및 Redis 전략 데이터 정리
+            self._strategy_table.clear_all_strategies()
+
             logger.info("CLOSING websocket message processed successfully")
 
         except ValueError as e:

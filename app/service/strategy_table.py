@@ -334,6 +334,20 @@ class StrategyTable:
                 f"stock={stock_code}"
             )
 
+    def clear_all_strategies(self) -> None:
+        """
+        모든 전략의 메모리 및 Redis 데이터 정리 (장 마감 시 호출)
+        """
+        strategy_ids = list(self._strategy_configs.keys())
+        for user_strategy_id in strategy_ids:
+            self._delete_target(user_strategy_id, stock_code=None)
+
+        # 혹시 남아있는 target_tables도 정리
+        self._target_tables.clear()
+        self._strategy_configs.clear()
+
+        logger.info(f"Cleared all strategies from memory: {len(strategy_ids)} strategies removed")
+
     async def initialize_from_start_command(self, strategies: List[Dict]) -> None:
         """
         START 명령어로부터 전략 테이블 초기화
@@ -490,26 +504,25 @@ class StrategyTable:
                         "stocks": []  # 종목별 목표가 정보
                     }
                     
-                    # 해당 전략의 종목별 목표가 정보 추가
-                    if user_strategy_id in self._target_tables:
-                        target_table = self._target_tables[user_strategy_id]
-                        for stock_code, target_price in target_table.items():
-                            strategy_data["stocks"].append({
-                                "stock_code": target_price.stock_code,
-                                "stock_name": target_price.stock_name,
-                                "exchange": target_price.exchange,
-                                "stock_open": target_price.stock_open,
-                                "target_price": target_price.target_price,
-                                "target_sell_price": target_price.target_sell_price,
-                                "stop_loss_price": target_price.stop_loss_price,
-                                "gap_rate": target_price.gap_rate,
-                                "take_profit_target": target_price.take_profit_target,
-                                "prob_up": target_price.prob_up,
-                                "signal": target_price.signal,
-                                "weight": target_price.weight,
-                                "target_quantity": target_price.target_quantity,
-                                "created_at": target_price.created_at.isoformat() if isinstance(target_price.created_at, datetime) else str(target_price.created_at)
-                            })
+                    # 해당 전략의 종목별 목표가 정보 추가 (Redis에서 읽어옴)
+                    redis_targets = self._redis_manager.get_strategy_all_targets(user_strategy_id)
+                    for stock_code, target_data in redis_targets.items():
+                        strategy_data["stocks"].append({
+                            "stock_code": target_data.get("stock_code", stock_code),
+                            "stock_name": target_data.get("stock_name", ""),
+                            "exchange": target_data.get("exchange", ""),
+                            "stock_open": target_data.get("stock_open", 0),
+                            "target_price": target_data.get("target_price", 0),
+                            "target_sell_price": target_data.get("target_sell_price", 0),
+                            "stop_loss_price": target_data.get("stop_loss_price", 0),
+                            "gap_rate": target_data.get("gap_rate", 0),
+                            "take_profit_target": target_data.get("take_profit_target", 0),
+                            "prob_up": target_data.get("prob_up", 0),
+                            "signal": target_data.get("signal", ""),
+                            "weight": target_data.get("weight", 0),
+                            "target_quantity": target_data.get("target_quantity", 0),
+                            "created_at": target_data.get("created_at", "")
+                        })
                     
                     strategies_data.append(strategy_data)
                 
