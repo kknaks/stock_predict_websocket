@@ -65,7 +65,7 @@ class WebSocketHandler:
             if start_command.config.strategies:
                 for strategy in start_command.config.strategies:
                     strategy_dict = strategy.copy() if isinstance(strategy, dict) else dict(strategy)
-                    
+
                     # user_id가 없고 account_id가 있으면 users에서 찾기
                     if "user_id" not in strategy_dict and "account_id" in strategy_dict:
                         account_id = strategy_dict["account_id"]
@@ -73,27 +73,34 @@ class WebSocketHandler:
                         for user in start_command.config.users:
                             if user.account.account_id == account_id:
                                 strategy_dict["user_id"] = user.user_id
+                                # account_type도 함께 설정
+                                strategy_dict["account_type"] = user.account.account_type
                                 break
                         else:
                             logger.warning(
                                 f"Could not find user_id for account_id={account_id} in strategy: {strategy_dict}"
                             )
-                    
+
                     # config.is_mock을 항상 설정
                     strategy_dict["is_mock"] = start_command.config.is_mock
-                    
+                    # account_type이 없으면 기본값 설정
+                    if "account_type" not in strategy_dict:
+                        strategy_dict["account_type"] = "mock" if start_command.config.is_mock else "real"
+
                     all_strategies.append(strategy_dict)
             
-            # users의 strategies도 수집 (user_id 추가)
+            # users의 strategies도 수집 (user_id, account_type 추가)
             if start_command.config.users:
                 for user in start_command.config.users:
                     if user.strategies:
-                        # 각 전략에 user_id 추가
+                        # 각 전략에 user_id, account_type 추가
                         for strategy in user.strategies:
                             strategy_with_user_id = strategy.copy() if isinstance(strategy, dict) else dict(strategy)
                             strategy_with_user_id["user_id"] = user.user_id
                             # config.is_mock을 항상 설정
                             strategy_with_user_id["is_mock"] = start_command.config.is_mock
+                            # account_type 설정 (user의 account에서 가져옴)
+                            strategy_with_user_id["account_type"] = user.account.account_type
                             all_strategies.append(strategy_with_user_id)
             
             if all_strategies:
@@ -118,6 +125,7 @@ class WebSocketHandler:
                                     user_strategy_id=user_strategy_id,
                                     data={
                                         "is_mock": strategy.get("is_mock", False),
+                                        "account_type": strategy.get("account_type", "mock"),
                                         "user_id": strategy.get("user_id"),
                                         "strategy_id": strategy.get("strategy_id"),
                                     }

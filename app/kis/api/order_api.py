@@ -69,6 +69,7 @@ class OrderAPI:
                 }
 
             is_mock = strategy_config.get("is_mock", False)
+            account_type = strategy_config.get("account_type", "mock")  # real/paper/mock
             user_id = strategy_config.get("user_id")
 
             # 2. daily_strategy_id 조회 (없으면 생성)
@@ -126,9 +127,12 @@ class OrderAPI:
             }
             self._redis_manager.save_order(order_data)
 
-            # 6. 주문 실행
-            if is_mock:
-                # Mock 모드: 계좌 정보 없이 주문 가정
+            # 6. 주문 실행 (account_type에 따라 분기)
+            # mock: API 호출 없이 시뮬레이션
+            # paper: 모의투자 API 호출
+            # real: 실전투자 API 호출
+            if account_type == "mock":
+                # Mock 모드: 계좌 정보 없이 주문 가정 (테스트용)
                 # Mock 모드에서 주문번호 생성 (타임스탬프 기반 고유 ID)
                 mock_order_no = f"MOCK-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"
 
@@ -224,7 +228,7 @@ class OrderAPI:
                     "result": mock_order_result
                 }
             else:
-                # 실제 모드: 계좌 정보 조회 필수
+                # paper/real 모드: 계좌 정보 조회 필수
                 account_connection = self._redis_manager.get_account_connection_by_strategy_id(user_strategy_id)
                 if not account_connection:
                     error_msg = f"계좌 연결 정보를 찾을 수 없습니다: user_strategy_id={user_strategy_id}"
@@ -237,7 +241,6 @@ class OrderAPI:
                 account_no = account_connection.get("account_no")
                 account_product_code = account_connection.get("account_product_code")
                 appkey = account_connection.get("appkey")
-                env_dv = account_connection.get("env_dv", "demo")  # 기본값: demo
                 access_token = account_connection.get("access_token")
 
                 # 계좌번호 분리 (12345678-01 -> cano=12345678, acnt_prdt_cd=01)
@@ -247,7 +250,7 @@ class OrderAPI:
                     cano = account_no
                     acnt_prdt_cd = account_product_code or "01"
 
-                # 실제 모드: KIS API로 주문
+                # KIS API로 주문 (paper/real)
                 if not access_token:
                     error_msg = f"액세스 토큰이 없습니다: account_no={account_no}"
                     logger.error(error_msg)
@@ -256,9 +259,9 @@ class OrderAPI:
                         "error": error_msg
                     }
 
-                # 주문 API 호출
+                # 주문 API 호출 (account_type에 따라 도메인/TR_ID 결정)
                 order_result = await self._place_buy_order(
-                    env_dv=env_dv,
+                    account_type=account_type,
                     cano=cano,
                     acnt_prdt_cd=acnt_prdt_cd,
                     appkey=appkey,
@@ -350,7 +353,7 @@ class OrderAPI:
 
     async def _place_buy_order(
         self,
-        env_dv: str,
+        account_type: str,
         cano: str,
         acnt_prdt_cd: str,
         appkey: str,
@@ -364,7 +367,7 @@ class OrderAPI:
         KIS API로 매수 주문 전송
 
         Args:
-            env_dv: 환경구분 (real: 실전, demo: 모의)
+            account_type: 계좌유형 (real: 실전, paper: 모의)
             cano: 종합계좌번호
             acnt_prdt_cd: 계좌상품코드
             appkey: 앱키
@@ -378,14 +381,15 @@ class OrderAPI:
             주문 결과
         """
         try:
-            # Base URL 설정
-            base_url = KIS_BASE_URL if env_dv == "real" else KIS_PAPER_URL
-            
-            # TR_ID 설정
-            if env_dv == "real":
-                tr_id = "TTTC0002U"  # 실전 매수
+            # Base URL 및 TR_ID 설정 (account_type에 따라)
+            # real: 실전투자 / paper: 모의투자
+            if account_type == "real":
+                base_url = KIS_BASE_URL
+                tr_id = "TTTC0012U"  # 실전 매수
             else:
-                tr_id = "VTTC0002U"  # 모의 매수
+                # paper (모의투자)
+                base_url = KIS_PAPER_URL
+                tr_id = "VTTC0012U"  # 모의 매수
 
             url = f"{base_url}/uapi/domestic-stock/v1/trading/order-cash"
             
@@ -485,6 +489,7 @@ class OrderAPI:
                 }
 
             is_mock = strategy_config.get("is_mock", False)
+            account_type = strategy_config.get("account_type", "mock")  # real/paper/mock
             user_id = strategy_config.get("user_id")
 
             # 2. daily_strategy_id 조회
@@ -559,9 +564,12 @@ class OrderAPI:
             }
             self._redis_manager.save_order(order_data)
 
-            # 6. 주문 실행
-            if is_mock:
-                # Mock 모드: 계좌 정보 없이 주문 가정
+            # 6. 주문 실행 (account_type에 따라 분기)
+            # mock: API 호출 없이 시뮬레이션
+            # paper: 모의투자 API 호출
+            # real: 실전투자 API 호출
+            if account_type == "mock":
+                # Mock 모드: 계좌 정보 없이 주문 가정 (테스트용)
                 # Mock 모드에서 주문번호 생성 (타임스탬프 기반 고유 ID)
                 mock_order_no = f"MOCK-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"
 
@@ -660,7 +668,7 @@ class OrderAPI:
                     "result": mock_order_result
                 }
             else:
-                # 실제 모드: 계좌 정보 조회 필수
+                # paper/real 모드: 계좌 정보 조회 필수
                 account_connection = self._redis_manager.get_account_connection_by_strategy_id(user_strategy_id)
                 if not account_connection:
                     error_msg = f"계좌 연결 정보를 찾을 수 없습니다: user_strategy_id={user_strategy_id}"
@@ -673,7 +681,6 @@ class OrderAPI:
                 account_no = account_connection.get("account_no")
                 account_product_code = account_connection.get("account_product_code")
                 appkey = account_connection.get("appkey")
-                env_dv = account_connection.get("env_dv", "demo")  # 기본값: demo
                 access_token = account_connection.get("access_token")
 
                 # 계좌번호 분리 (12345678-01 -> cano=12345678, acnt_prdt_cd=01)
@@ -683,7 +690,7 @@ class OrderAPI:
                     cano = account_no
                     acnt_prdt_cd = account_product_code or "01"
 
-                # 실제 모드: KIS API로 주문
+                # KIS API로 주문 (paper/real)
                 if not access_token:
                     error_msg = f"액세스 토큰이 없습니다: account_no={account_no}"
                     logger.error(error_msg)
@@ -692,9 +699,9 @@ class OrderAPI:
                         "error": error_msg
                     }
 
-                # 주문 API 호출
+                # 주문 API 호출 (account_type에 따라 도메인/TR_ID 결정)
                 order_result = await self._place_sell_order(
-                    env_dv=env_dv,
+                    account_type=account_type,
                     cano=cano,
                     acnt_prdt_cd=acnt_prdt_cd,
                     appkey=appkey,
@@ -786,7 +793,7 @@ class OrderAPI:
 
     async def _place_sell_order(
         self,
-        env_dv: str,
+        account_type: str,
         cano: str,
         acnt_prdt_cd: str,
         appkey: str,
@@ -800,7 +807,7 @@ class OrderAPI:
         KIS API로 매도 주문 전송
 
         Args:
-            env_dv: 환경구분 (real: 실전, demo: 모의)
+            account_type: 계좌유형 (real: 실전, paper: 모의)
             cano: 종합계좌번호
             acnt_prdt_cd: 계좌상품코드
             appkey: 앱키
@@ -814,13 +821,14 @@ class OrderAPI:
             주문 결과
         """
         try:
-            # Base URL 설정
-            base_url = KIS_BASE_URL if env_dv == "real" else KIS_PAPER_URL
-            
-            # TR_ID 설정
-            if env_dv == "real":
+            # Base URL 및 TR_ID 설정 (account_type에 따라)
+            # real: 실전투자 / paper: 모의투자
+            if account_type == "real":
+                base_url = KIS_BASE_URL
                 tr_id = "TTTC0011U"  # 실전 매도
             else:
+                # paper (모의투자)
+                base_url = KIS_PAPER_URL
                 tr_id = "VTTC0011U"  # 모의 매도
 
             url = f"{base_url}/uapi/domestic-stock/v1/trading/order-cash"
@@ -917,10 +925,10 @@ class OrderAPI:
                     "error": error_msg
                 }
 
-            is_mock = strategy_config.get("is_mock", False)
+            account_type = strategy_config.get("account_type", "mock")  # real/paper/mock
 
-            # 4. 주문 취소 실행
-            if is_mock:
+            # 주문 취소 실행 (account_type에 따라 분기)
+            if account_type == "mock":
                 # Mock 모드: 주문 취소 가정
                 logger.info(
                     f"[MOCK] 주문 취소 가정: "
@@ -928,7 +936,7 @@ class OrderAPI:
                     f"종목={stock_code}, "
                     f"주문번호={order_no}"
                 )
-                
+
                 return {
                     "success": True,
                     "is_mock": True,
@@ -938,7 +946,7 @@ class OrderAPI:
                     }
                 }
             else:
-                # 실제 모드: 계좌 정보 조회 필수
+                # paper/real 모드: 계좌 정보 조회 필수
                 account_connection = self._redis_manager.get_account_connection_by_strategy_id(user_strategy_id)
                 if not account_connection:
                     error_msg = f"계좌 연결 정보를 찾을 수 없습니다: user_strategy_id={user_strategy_id}"
@@ -951,7 +959,6 @@ class OrderAPI:
                 account_no = account_connection.get("account_no")
                 account_product_code = account_connection.get("account_product_code")
                 appkey = account_connection.get("appkey")
-                env_dv = account_connection.get("env_dv", "demo")  # 기본값: demo
                 access_token = account_connection.get("access_token")
 
                 # 계좌번호 분리 (12345678-01 -> cano=12345678, acnt_prdt_cd=01)
@@ -961,7 +968,7 @@ class OrderAPI:
                     cano = account_no
                     acnt_prdt_cd = account_product_code or "01"
 
-                # 실제 모드: KIS API로 주문 취소
+                # KIS API로 주문 취소 (paper/real)
                 if not access_token:
                     error_msg = f"액세스 토큰이 없습니다: account_no={account_no}"
                     logger.error(error_msg)
@@ -970,9 +977,9 @@ class OrderAPI:
                         "error": error_msg
                     }
 
-                # 주문 취소 API 호출
+                # 주문 취소 API 호출 (account_type에 따라 도메인/TR_ID 결정)
                 cancel_result = await self._place_cancel_order(
-                    env_dv=env_dv,
+                    account_type=account_type,
                     cano=cano,
                     acnt_prdt_cd=acnt_prdt_cd,
                     appkey=appkey,
@@ -1016,7 +1023,7 @@ class OrderAPI:
 
     async def _place_cancel_order(
         self,
-        env_dv: str,
+        account_type: str,
         cano: str,
         acnt_prdt_cd: str,
         appkey: str,
@@ -1028,7 +1035,7 @@ class OrderAPI:
         KIS API로 주문 취소 전송
 
         Args:
-            env_dv: 환경구분 (real: 실전, demo: 모의)
+            account_type: 계좌유형 (real: 실전, paper: 모의)
             cano: 종합계좌번호
             acnt_prdt_cd: 계좌상품코드
             appkey: 앱키
@@ -1040,13 +1047,14 @@ class OrderAPI:
             취소 결과
         """
         try:
-            # Base URL 설정
-            base_url = KIS_BASE_URL if env_dv == "real" else KIS_PAPER_URL
-            
-            # TR_ID 설정 (주문 취소)
-            if env_dv == "real":
+            # Base URL 및 TR_ID 설정 (account_type에 따라)
+            # real: 실전투자 / paper: 모의투자
+            if account_type == "real":
+                base_url = KIS_BASE_URL
                 tr_id = "TTTC0003U"  # 실전 주문 취소
             else:
+                # paper (모의투자)
+                base_url = KIS_PAPER_URL
                 tr_id = "VTTC0003U"  # 모의 주문 취소
 
             url = f"{base_url}/uapi/domestic-stock/v1/trading/order-rvsecncl"

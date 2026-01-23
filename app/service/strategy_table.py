@@ -25,6 +25,7 @@ class StrategyConfig:
     user_strategy_id: int
     user_id: int
     is_mock: bool
+    account_type: str  # 계좌 유형 (real/paper/mock)
     strategy_id: int
     strategy_name: str
     strategy_weight_type: str
@@ -88,6 +89,7 @@ class StrategyTable:
             "user_strategy_id": strategy_config.user_strategy_id,
             "user_id": strategy_config.user_id,
             "is_mock": strategy_config.is_mock,
+            "account_type": strategy_config.account_type,
             "strategy_id": strategy_config.strategy_id,
             "strategy_name": strategy_config.strategy_name,
             "strategy_weight_type": strategy_config.strategy_weight_type,
@@ -375,6 +377,7 @@ class StrategyTable:
                     user_strategy_id=strategy_data["user_strategy_id"],
                     user_id=strategy_data["user_id"],
                     is_mock=strategy_data.get("is_mock", False),
+                    account_type=strategy_data.get("account_type", "mock"),  # 기본값: mock
                     strategy_id=strategy_data["strategy_id"],
                     strategy_name=strategy_data["strategy_name"],
                     strategy_weight_type=strategy_data.get("strategy_weight_type", "equal"),
@@ -496,6 +499,7 @@ class StrategyTable:
                         "user_strategy_id": strategy_config.user_strategy_id,
                         "user_id": strategy_config.user_id,
                         "is_mock": strategy_config.is_mock,
+                        "account_type": strategy_config.account_type,
                         "strategy_id": strategy_config.strategy_id,
                         "strategy_name": strategy_config.strategy_name,
                         "strategy_weight_type": strategy_config.strategy_weight_type,

@@ -451,22 +451,23 @@ class WebSocketManager:
                 try:
                     # user의 strategies에서 user_strategy_id 리스트 추출
                     user_strategy_ids = [s.get("user_strategy_id") for s in user.strategies if s.get("user_strategy_id")]
-                    
+
                     logger.info(
                         f"Starting account websocket: {account.account_no} "
-                        f"(user_id: {user.user_id}, hts_id: {account.hts_id})"
+                        f"(user_id: {user.user_id}, hts_id: {account.hts_id}, account_type: {account.account_type})"
                     )
                     account_client = AccountWebSocketClient(
                         ws_token=account.ws_token,
                         appkey=account.app_key,
                         env_dv=config.env_dv,
+                        account_type=account.account_type,  # real/paper/mock
                         is_mock=config.is_mock,
                         account_no=account.account_no,
                         account_product_code=account.account_product_code,
                         access_token=account.access_token,
                         user_id=user.user_id,
                         user_strategy_ids=user_strategy_ids,
-                        hts_id=account.hts_id,  # Pydantic 모델이므로 직접 접근
+                        hts_id=account.hts_id,
                     )
 
                     task = asyncio.create_task(account_client.connect_and_run())

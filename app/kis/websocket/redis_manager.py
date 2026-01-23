@@ -147,12 +147,15 @@ class WebSocketRedisManager:
         env_dv: str,
         account_product_code: str,
         is_mock: bool = False,
+        account_type: str = "mock",
         access_token: Optional[str] = None,
         user_id: Optional[int] = None,
         user_strategy_ids: Optional[list] = None,
         hts_id: Optional[str] = None,
         status: str = "connected",
         reconnect_attempts: int = 0,
+        decrypt_key: Optional[str] = None,
+        decrypt_iv: Optional[str] = None,
     ) -> bool:
         """
         계좌 웹소켓 연결 정보 저장
@@ -163,6 +166,8 @@ class WebSocketRedisManager:
             appkey: 앱키
             env_dv: 환경구분
             account_product_code: 계좌상품코드
+            is_mock: 모의 여부
+            account_type: 계좌 유형 (real/paper/mock)
             access_token: OAuth 액세스 토큰 (API 주문용)
             user_id: 사용자 ID
             user_strategy_ids: 사용자 전략 ID 리스트
@@ -186,6 +191,7 @@ class WebSocketRedisManager:
                 "env_dv": env_dv,
                 "account_product_code": account_product_code,
                 "is_mock": is_mock,
+                "account_type": account_type,
                 "status": status,
                 "reconnect_attempts": reconnect_attempts,
                 "connected_at": datetime.now().isoformat(),
@@ -207,6 +213,12 @@ class WebSocketRedisManager:
             # hts_id가 있으면 추가
             if hts_id:
                 data["hts_id"] = hts_id
+            
+            # 복호화 키 및 IV가 있으면 추가 (Base64 인코딩된 문자열로 저장)
+            if decrypt_key:
+                data["decrypt_key"] = decrypt_key
+            if decrypt_iv:
+                data["decrypt_iv"] = decrypt_iv
 
             # 계좌번호 기준으로 저장
             self._redis_client.setex(

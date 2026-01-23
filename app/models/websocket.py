@@ -31,6 +31,7 @@ class UserAccount(BaseModel):
     """사용자 계좌 정보"""
 
     account_id: int = Field(..., description="계좌 ID")
+    account_type: str = Field(..., description="계좌 유형 (real/paper/mock)")
     account_no: str = Field(..., description="계좌번호")
     account_product_code: str = Field(..., description="계좌상품코드")
     account_balance: Optional[float] = Field(default=None, description="계좌 잔액")
