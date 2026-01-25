@@ -4,7 +4,7 @@ KIS 웹소켓 메시지 모델
 
 from datetime import datetime
 from typing import List, Literal, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class TokenInfo(BaseModel):
@@ -41,6 +41,12 @@ class UserAccount(BaseModel):
     ws_token: str = Field(..., description="웹소켓 토큰")
     expires_in: int = Field(..., description="토큰 만료 시간(초)")
     hts_id: Optional[str] = Field(default=None, description="고객ID (체결통보 구독용)")
+
+    @field_validator("account_type", mode="before")
+    @classmethod
+    def lowercase_account_type(cls, v: str) -> str:
+        """account_type을 소문자로 변환 (DB에서 대문자로 올 수 있음)"""
+        return v.lower() if isinstance(v, str) else v
 
 
 class UserInfo(BaseModel):
