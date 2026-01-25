@@ -174,9 +174,6 @@ class PriceWebSocketClient:
             self._last_ping_time = None  # 연결 시 PING 시간 초기화
             logger.info("Price websocket connected")
 
-            # Kafka Producer 시작
-            await self._price_producer.start()
-
             # Redis에 연결 정보 저장
             self._redis_manager.save_price_connection(
                 ws_token=self.ws_token,
@@ -931,6 +928,7 @@ class PriceWebSocketClient:
 
         # Redis에서 연결 정보 삭제
         self._redis_manager.delete_price_connection()
+
         await send_slack(f"[KIS WebSocket] 종목 구독 종료 - 총 {len(self.stocks)}개 종목")
 
     @property

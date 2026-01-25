@@ -34,9 +34,14 @@ KIS_PAPER_URL = "https://openapivts.koreainvestment.com:29443"  # 모의
 class OrderAPI:
     """주문 API 클라이언트"""
 
-    def __init__(self):
+    def __init__(self, simulation_mode: bool = False):
+        """
+        Args:
+            simulation_mode: True면 KIS API 호출 없이 mock 주문번호 생성 (테스트용)
+        """
         self._redis_manager = get_redis_manager()
         self._order_signal_producer = get_order_signal_producer()
+        self._simulation_mode = simulation_mode
 
     async def process_buy_order(
         self,
@@ -381,6 +386,21 @@ class OrderAPI:
             주문 결과
         """
         try:
+            # Simulation 모드: API 호출 없이 mock 주문번호 반환 (테스트용)
+            if self._simulation_mode:
+                sim_order_no = f"SIM-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"
+                logger.info(
+                    f"[SIMULATION] 매수 주문 시뮬레이션: "
+                    f"종목={stock_code}, 수량={ord_qty}, 가격={ord_unpr}, "
+                    f"주문번호={sim_order_no}"
+                )
+                return {
+                    "success": True,
+                    "order_no": sim_order_no,
+                    "order_time": datetime.now().strftime("%H%M%S"),
+                    "raw_response": {"simulation": True}
+                }
+
             # Base URL 및 TR_ID 설정 (account_type에 따라)
             # real: 실전투자 / paper: 모의투자
             if account_type == "real":
@@ -821,6 +841,21 @@ class OrderAPI:
             주문 결과
         """
         try:
+            # Simulation 모드: API 호출 없이 mock 주문번호 반환 (테스트용)
+            if self._simulation_mode:
+                sim_order_no = f"SIM-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"
+                logger.info(
+                    f"[SIMULATION] 매도 주문 시뮬레이션: "
+                    f"종목={stock_code}, 수량={ord_qty}, 가격={ord_unpr}, "
+                    f"주문번호={sim_order_no}"
+                )
+                return {
+                    "success": True,
+                    "order_no": sim_order_no,
+                    "order_time": datetime.now().strftime("%H%M%S"),
+                    "raw_response": {"simulation": True}
+                }
+
             # Base URL 및 TR_ID 설정 (account_type에 따라)
             # real: 실전투자 / paper: 모의투자
             if account_type == "real":
@@ -832,7 +867,7 @@ class OrderAPI:
                 tr_id = "VTTC0011U"  # 모의 매도
 
             url = f"{base_url}/uapi/domestic-stock/v1/trading/order-cash"
-            
+
             headers = {
                 "authorization": f"Bearer {access_token}",
                 "appkey": appkey,

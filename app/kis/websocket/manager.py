@@ -19,6 +19,9 @@ from app.kis.websocket.exceptions import (
 )
 from app.kis.websocket.error_stats import get_error_stats
 from app.kis.websocket.redis_manager import get_redis_manager
+from app.kafka.price_producer import get_price_producer
+from app.kafka.order_signal_producer import get_order_signal_producer
+from app.kafka.daily_strategy_producer import get_daily_strategy_producer
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +79,15 @@ class WebSocketManager:
             
             logger.info(f"Starting WebSocket connections... target={command.target}")
 
+            # Kafka Producer 시작 (WebSocket과 생명주기 동일하게 관리)
+            await self._start_kafka_producers()
+
             config = command.config
             tokens = command.tokens
             partial_failure = False
             price_websocket_started = False
-            account_websocket_skipped_mock = False  # mock 모드에서 의도적으로 건너뛴 경우
             new_accounts_added = 0
+            mock_accounts_skipped = 0  # account_type이 mock인 계좌는 개별 스킵됨
 
             # 가격 웹소켓 시작 (PRICE 타겟일 때만)
             if command.target in ("ALL", "PRICE"):
@@ -112,15 +118,10 @@ class WebSocketManager:
 
             # 계좌 웹소켓들 시작 (ACCOUNT 타겟일 때만)
             if command.target in ("ALL", "ACCOUNT"):
-                if config.is_mock:
-                    # mock 모드에서는 실제 계좌 웹소켓 연결을 건너뜀 (의도된 동작)
-                    logger.info("Skipping account websocket connection in mock mode")
-                    account_websocket_skipped_mock = True
-                elif config.users:
+                if config.users:
                     # users가 있는 경우 (각 user의 account에서 ws_token과 app_key 사용)
                     try:
-                        new_accounts = await self._start_account_websockets_from_users(config)
-                        new_accounts_added = new_accounts
+                        new_accounts_added, mock_accounts_skipped = await self._start_account_websockets_from_users(config)
                     except Exception as e:
                         logger.error(f"Failed to start some account websockets: {e}", exc_info=True)
                         self._error_stats.record_error(e)
@@ -143,16 +144,15 @@ class WebSocketManager:
 
             # 성공 조건:
             # 1. 가격 웹소켓이 시작되었거나 (이미 실행 중이었거나)
-            # 2. 계좌 웹소켓이 시작되었거나 (새로 추가되었거나)
-            # 3. mock 모드에서 계좌 웹소켓을 의도적으로 건너뛴 경우
+            # 2. 계좌 웹소켓이 시작되었거나 (새로 추가되었거나, mock은 개별 스킵)
             success = False
             if command.target in ("ALL", "PRICE"):
                 if price_websocket_started or (self._price_client and self._price_client.is_connected):
                     success = True
             if command.target in ("ALL", "ACCOUNT"):
-                if new_accounts_added > 0 or account_websocket_skipped_mock or len(self._account_clients) > 0:
+                if new_accounts_added > 0 or mock_accounts_skipped > 0 or len(self._account_clients) > 0:
                     success = True
-            
+
             if success:
                 self._status = WebSocketStatus.RUNNING
                 if partial_failure:
@@ -161,8 +161,8 @@ class WebSocketManager:
                         f"Failed accounts: {self._failed_accounts}"
                     )
                 else:
-                    if account_websocket_skipped_mock:
-                        logger.info("WebSocket connections started successfully (account websocket skipped in mock mode)")
+                    if mock_accounts_skipped > 0 and new_accounts_added == 0:
+                        logger.info(f"WebSocket connections started (mock accounts skipped: {mock_accounts_skipped})")
                     elif new_accounts_added > 0:
                         logger.info(f"Successfully added {new_accounts_added} new account websocket(s)")
                     else:
@@ -175,7 +175,7 @@ class WebSocketManager:
                         self._status = WebSocketStatus.ERROR
                     logger.error("Price websocket failed to start")
                     return False
-                elif command.target == "ACCOUNT" and new_accounts_added == 0 and not account_websocket_skipped_mock:
+                elif command.target == "ACCOUNT" and new_accounts_added == 0 and mock_accounts_skipped == 0:
                     logger.warning("No account websockets were started")
                     return False
                 else:
@@ -242,6 +242,10 @@ class WebSocketManager:
                         logger.warning(f"Task {i} ended with error: {result}")
 
             self._tasks.clear()
+
+            # Kafka Producer 종료 (WebSocket과 생명주기 동일하게 관리)
+            await self._stop_kafka_producers()
+
             self._status = WebSocketStatus.IDLE
 
             if stop_errors:
@@ -387,22 +391,29 @@ class WebSocketManager:
     #         self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "account"})
     #         raise
 
-    async def _start_account_websockets_from_users(self, config: StartConfig) -> int:
+    async def _start_account_websockets_from_users(self, config: StartConfig) -> tuple[int, int]:
         """
         계좌 웹소켓들 시작 (users 방식: 각 user의 account에서 ws_token과 app_key 사용)
-        
+
         Returns:
-            새로 추가된 계좌 웹소켓 수
+            (새로 추가된 계좌 웹소켓 수, mock으로 스킵된 계좌 수)
         """
         try:
             logger.info(f"Starting account websockets for {len(config.users)} users")
             success_count = 0
             failure_count = 0
             skipped_count = 0
+            mock_skipped_count = 0
 
             for user in config.users:
                 account = user.account
-                
+
+                # account_type이 mock인 경우 WebSocket 연결 스킵
+                if account.account_type == "mock":
+                    logger.info(f"Skipping account websocket for mock account: {account.account_no} (user_id: {user.user_id})")
+                    mock_skipped_count += 1
+                    continue
+
                 # 이미 실행 중인 계좌는 스킵
                 if account.account_no in self._account_clients:
                     existing_client = self._account_clients[account.account_no]
@@ -456,12 +467,14 @@ class WebSocketManager:
                         f"Starting account websocket: {account.account_no} "
                         f"(user_id: {user.user_id}, hts_id: {account.hts_id}, account_type: {account.account_type})"
                     )
+                    # is_mock은 account_type 기반으로 결정 (mock이면 True, 아니면 False)
+                    is_mock = account.account_type == "mock"
                     account_client = AccountWebSocketClient(
                         ws_token=account.ws_token,
                         appkey=account.app_key,
                         env_dv=config.env_dv,
                         account_type=account.account_type,  # real/paper/mock
-                        is_mock=config.is_mock,
+                        is_mock=is_mock,
                         account_no=account.account_no,
                         account_product_code=account.account_product_code,
                         access_token=account.access_token,
@@ -499,18 +512,68 @@ class WebSocketManager:
                     failure_count += 1
 
             logger.info(
-                f"Account websockets: {success_count} new, {skipped_count} skipped, {failure_count} failed"
+                f"Account websockets: {success_count} new, {skipped_count} skipped, "
+                f"{mock_skipped_count} mock skipped, {failure_count} failed"
             )
 
             if failure_count > 0:
                 logger.warning(f"Failed to start {failure_count} account websockets")
 
-            return success_count
+            return success_count, mock_skipped_count
 
         except Exception as e:
             logger.error(f"Failed to start account websockets: {e}", exc_info=True)
             self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "account"})
             raise
+
+    async def _start_kafka_producers(self) -> None:
+        """Kafka Producer들 시작"""
+        try:
+            price_producer = get_price_producer()
+            if not price_producer._producer:
+                await price_producer.start()
+                logger.info("Price producer started")
+        except Exception as e:
+            logger.error(f"Failed to start price producer: {e}")
+
+        try:
+            order_signal_producer = get_order_signal_producer()
+            if not order_signal_producer._producer:
+                await order_signal_producer.start()
+                logger.info("Order signal producer started")
+        except Exception as e:
+            logger.error(f"Failed to start order signal producer: {e}")
+
+        try:
+            daily_strategy_producer = get_daily_strategy_producer()
+            if not daily_strategy_producer._producer:
+                await daily_strategy_producer.start()
+                logger.info("Daily strategy producer started")
+        except Exception as e:
+            logger.error(f"Failed to start daily strategy producer: {e}")
+
+    async def _stop_kafka_producers(self) -> None:
+        """Kafka Producer들 종료"""
+        try:
+            price_producer = get_price_producer()
+            await price_producer.stop()
+            logger.info("Price producer stopped")
+        except Exception as e:
+            logger.warning(f"Error stopping price producer: {e}")
+
+        try:
+            order_signal_producer = get_order_signal_producer()
+            await order_signal_producer.stop()
+            logger.info("Order signal producer stopped")
+        except Exception as e:
+            logger.warning(f"Error stopping order signal producer: {e}")
+
+        try:
+            daily_strategy_producer = get_daily_strategy_producer()
+            await daily_strategy_producer.stop()
+            logger.info("Daily strategy producer stopped")
+        except Exception as e:
+            logger.warning(f"Error stopping daily strategy producer: {e}")
 
     async def _stop_price_websocket(self) -> None:
         """가격 웹소켓 종료"""

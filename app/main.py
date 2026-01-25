@@ -16,8 +16,6 @@ from websockets.server import WebSocketServerProtocol as WebSocketServerProtocol
 
 from app.config.settings import settings
 from app.kafka import get_predict_consumer, get_websocket_consumer
-from app.kafka.daily_strategy_producer import get_daily_strategy_producer
-from app.kafka.order_signal_producer import get_order_signal_producer
 from app.handler.prediction_handler import get_prediction_handler
 from app.handler.websocket_handler import get_websocket_handler
 
@@ -127,22 +125,6 @@ async def main():
     # 웹소켓 핸들러 등록
     websocket_consumer.add_handler(websocket_handler.handle_command)
 
-    # Daily strategy producer 시작
-    daily_strategy_producer = get_daily_strategy_producer()
-    producer_connected = await daily_strategy_producer.start()
-    if producer_connected:
-        logger.info("Daily strategy producer connection established")
-    else:
-        logger.warning("Failed to connect to Daily strategy producer")
-
-    # Order signal producer 시작
-    order_signal_producer = get_order_signal_producer()
-    order_producer_connected = await order_signal_producer.start()
-    if order_producer_connected:
-        logger.info("Order signal producer connection established")
-    else:
-        logger.warning("Failed to connect to Order signal producer")
-
     # 예측 결과 Kafka consumer 시작
     prediction_connected = await prediction_consumer.start()
     prediction_task: Optional[asyncio.Task] = None
@@ -195,12 +177,6 @@ async def main():
         except asyncio.CancelledError:
             pass
     await websocket_consumer.stop()
-
-    # Daily strategy producer 정리
-    await daily_strategy_producer.stop()
-
-    # Order signal producer 정리
-    await order_signal_producer.stop()
 
     logger.info("Server shutdown complete")
 
