@@ -263,7 +263,11 @@ class WebSocketHandler:
             logger.error(f"미체결 매수 주문 취소 처리 오류: {e}", exc_info=True)
 
     async def _close_unsold_positions(self, user_strategy_id: int) -> None:
-        """Position 기반 미매도 종목 시장가 매도"""
+        """Position 기반 미매도 종목 시장가 매도
+
+        Case 1: 활성 매도 주문 없음 → 새 시장가 매도 주문 생성
+        Case 2: 활성 매도 주문 있음 (미체결/부분체결) → 시장가로 정정 주문
+        """
         try:
             # daily_strategy_id 조회
             daily_strategy_id = self._redis_manager.get_daily_strategy_id(user_strategy_id)
@@ -293,50 +297,99 @@ class WebSocketHandler:
                 if holding_quantity <= 0:
                     continue
 
-                logger.info(
-                    f"시장가 매도 (Position 기반): "
-                    f"전략={user_strategy_id}, "
-                    f"종목={stock_code}, "
-                    f"보유수량={holding_quantity}"
-                )
+                # 활성 매도 주문 확인
+                active_sell = self._redis_manager.get_active_sell_order(daily_strategy_id, stock_code)
 
-                # 시장가 매도 주문 생성
-                market_sell_signal = SignalResult(
-                    signal_type="SELL",
-                    stock_code=stock_code,
-                    current_price=0.0,
-                    target_price=None,
-                    target_quantity=holding_quantity,
-                    stop_loss_price=None,
-                    recommended_order_price=0.0,  # 시장가
-                    recommended_order_type=OrderType.MARKET,
-                    expected_slippage_pct=0.0,
-                    urgency="CRITICAL",
-                    reason="장 마감 시 Position 기반 강제 매도 (시장가)"
-                )
+                if active_sell:
+                    # Case 2: 이미 매도 주문 존재 → 시장가로 정정 주문
+                    order_no = active_sell.get("order_no")
+                    order_quantity = active_sell.get("order_quantity", 0)
+                    executed_quantity = active_sell.get("executed_quantity", 0)
+                    remaining_quantity = order_quantity - executed_quantity
 
-                # 시장가 매도 주문 실행
-                sell_result = await self._order_api.process_sell_order(
-                    user_strategy_id=user_strategy_id,
-                    signal=market_sell_signal,
-                    order_quantity=holding_quantity,
-                    stock_name=stock_name
-                )
+                    if not order_no or remaining_quantity <= 0:
+                        logger.debug(
+                            f"정정 대상 없음 (주문번호 없거나 미체결 수량 없음): "
+                            f"종목={stock_code}, order_no={order_no}, remaining={remaining_quantity}"
+                        )
+                        continue
 
-                if sell_result.get("success"):
                     logger.info(
-                        f"✅ Position 기반 시장가 매도 완료: "
+                        f"매도 주문 정정 (시장가로 변경): "
                         f"전략={user_strategy_id}, "
                         f"종목={stock_code}, "
-                        f"수량={holding_quantity}"
+                        f"주문번호={order_no}, "
+                        f"미체결수량={remaining_quantity}"
                     )
+
+                    # 시장가로 정정 주문
+                    modify_result = await self._order_api.modify_order_to_market(
+                        user_strategy_id=user_strategy_id,
+                        order_no=order_no,
+                        stock_code=stock_code,
+                        remaining_quantity=remaining_quantity
+                    )
+
+                    if modify_result.get("success"):
+                        logger.info(
+                            f"✅ 매도 주문 정정 완료 (시장가): "
+                            f"전략={user_strategy_id}, "
+                            f"종목={stock_code}, "
+                            f"주문번호={order_no}"
+                        )
+                    else:
+                        logger.error(
+                            f"❌ 매도 주문 정정 실패: "
+                            f"전략={user_strategy_id}, "
+                            f"종목={stock_code}, "
+                            f"오류={modify_result.get('error', 'N/A')}"
+                        )
                 else:
-                    logger.error(
-                        f"❌ Position 기반 시장가 매도 실패: "
+                    # Case 1: 매도 주문 없음 → 새 시장가 매도 주문 생성
+                    logger.info(
+                        f"신규 시장가 매도 (Position 기반): "
                         f"전략={user_strategy_id}, "
                         f"종목={stock_code}, "
-                        f"오류={sell_result.get('error', 'N/A')}"
+                        f"보유수량={holding_quantity}"
                     )
+
+                    # 시장가 매도 주문 생성
+                    market_sell_signal = SignalResult(
+                        signal_type="SELL",
+                        stock_code=stock_code,
+                        current_price=0.0,
+                        target_price=None,
+                        target_quantity=holding_quantity,
+                        stop_loss_price=None,
+                        recommended_order_price=0.0,  # 시장가
+                        recommended_order_type=OrderType.MARKET,
+                        expected_slippage_pct=0.0,
+                        urgency="CRITICAL",
+                        reason="장 마감 시 Position 기반 강제 매도 (시장가)"
+                    )
+
+                    # 시장가 매도 주문 실행
+                    sell_result = await self._order_api.process_sell_order(
+                        user_strategy_id=user_strategy_id,
+                        signal=market_sell_signal,
+                        order_quantity=holding_quantity,
+                        stock_name=stock_name
+                    )
+
+                    if sell_result.get("success"):
+                        logger.info(
+                            f"✅ Position 기반 시장가 매도 완료: "
+                            f"전략={user_strategy_id}, "
+                            f"종목={stock_code}, "
+                            f"수량={holding_quantity}"
+                        )
+                    else:
+                        logger.error(
+                            f"❌ Position 기반 시장가 매도 실패: "
+                            f"전략={user_strategy_id}, "
+                            f"종목={stock_code}, "
+                            f"오류={sell_result.get('error', 'N/A')}"
+                        )
 
         except Exception as e:
             logger.error(f"Position 기반 마감 처리 오류: {e}", exc_info=True)

@@ -1158,6 +1158,265 @@ class OrderAPI:
                 "error": str(e)
             }
 
+    async def modify_order_to_market(
+        self,
+        user_strategy_id: int,
+        order_no: str,
+        stock_code: str,
+        remaining_quantity: int
+    ) -> Dict[str, Any]:
+        """
+        주문 정정 처리 (시장가로 변경)
+
+        기존 지정가 주문을 시장가 주문으로 정정합니다.
+        장 마감 시 미체결 매도 주문을 시장가로 변경할 때 사용합니다.
+
+        Args:
+            user_strategy_id: 사용자 전략 ID
+            order_no: 원주문번호
+            stock_code: 종목코드
+            remaining_quantity: 미체결 수량
+
+        Returns:
+            정정 결과
+        """
+        try:
+            # 1. 전략 설정 조회
+            strategy_config = self._redis_manager.get_strategy_config(user_strategy_id)
+            if not strategy_config:
+                error_msg = f"전략 설정을 찾을 수 없습니다: user_strategy_id={user_strategy_id}"
+                logger.error(error_msg)
+                return {
+                    "success": False,
+                    "error": error_msg
+                }
+
+            account_type = strategy_config.get("account_type", "mock")  # real/paper/mock
+
+            # 주문 정정 실행 (account_type에 따라 분기)
+            if account_type == "mock":
+                # Mock 모드: 주문 정정 가정
+                logger.info(
+                    f"[MOCK] 주문 정정 가정 (시장가): "
+                    f"전략={user_strategy_id}, "
+                    f"종목={stock_code}, "
+                    f"주문번호={order_no}, "
+                    f"미체결수량={remaining_quantity}"
+                )
+
+                return {
+                    "success": True,
+                    "is_mock": True,
+                    "result": {
+                        "order_no": order_no,
+                        "status": "modified",
+                        "new_order_type": "MARKET"
+                    }
+                }
+            else:
+                # paper/real 모드: 계좌 정보 조회 필수
+                account_connection = self._redis_manager.get_account_connection_by_strategy_id(user_strategy_id)
+                if not account_connection:
+                    error_msg = f"계좌 연결 정보를 찾을 수 없습니다: user_strategy_id={user_strategy_id}"
+                    logger.error(error_msg)
+                    return {
+                        "success": False,
+                        "error": error_msg
+                    }
+
+                account_no = account_connection.get("account_no")
+                account_product_code = account_connection.get("account_product_code")
+                appkey = account_connection.get("appkey")
+                access_token = account_connection.get("access_token")
+
+                # 계좌번호 분리 (12345678-01 -> cano=12345678, acnt_prdt_cd=01)
+                if "-" in account_no:
+                    cano, acnt_prdt_cd = account_no.split("-")
+                else:
+                    cano = account_no
+                    acnt_prdt_cd = account_product_code or "01"
+
+                # KIS API로 주문 정정 (paper/real)
+                if not access_token:
+                    error_msg = f"액세스 토큰이 없습니다: account_no={account_no}"
+                    logger.error(error_msg)
+                    return {
+                        "success": False,
+                        "error": error_msg
+                    }
+
+                # 주문 정정 API 호출 (account_type에 따라 도메인/TR_ID 결정)
+                modify_result = await self._place_modify_order(
+                    account_type=account_type,
+                    cano=cano,
+                    acnt_prdt_cd=acnt_prdt_cd,
+                    appkey=appkey,
+                    access_token=access_token,
+                    stock_code=stock_code,
+                    order_no=order_no,
+                    ord_dvsn="01",  # 시장가
+                    ord_qty=str(remaining_quantity),
+                    ord_unpr="0"  # 시장가는 0
+                )
+
+                if modify_result.get("success"):
+                    logger.info(
+                        f"주문 정정 성공 (시장가): "
+                        f"전략={user_strategy_id}, "
+                        f"종목={stock_code}, "
+                        f"주문번호={order_no}"
+                    )
+
+                    return {
+                        "success": True,
+                        "is_mock": False,
+                        "result": modify_result
+                    }
+                else:
+                    logger.error(
+                        f"주문 정정 실패: "
+                        f"전략={user_strategy_id}, "
+                        f"종목={stock_code}, "
+                        f"오류={modify_result.get('error', 'N/A')}"
+                    )
+                    return {
+                        "success": False,
+                        "is_mock": False,
+                        "error": modify_result.get("error", "주문 정정 실패")
+                    }
+
+        except Exception as e:
+            logger.error(f"주문 정정 처리 오류: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    async def _place_modify_order(
+        self,
+        account_type: str,
+        cano: str,
+        acnt_prdt_cd: str,
+        appkey: str,
+        access_token: str,
+        stock_code: str,
+        order_no: str,
+        ord_dvsn: str,
+        ord_qty: str,
+        ord_unpr: str
+    ) -> Dict[str, Any]:
+        """
+        KIS API로 주문 정정 전송
+
+        Args:
+            account_type: 계좌유형 (real: 실전, paper: 모의)
+            cano: 종합계좌번호
+            acnt_prdt_cd: 계좌상품코드
+            appkey: 앱키
+            access_token: 액세스 토큰
+            stock_code: 종목코드
+            order_no: 원주문번호
+            ord_dvsn: 주문구분 (00: 지정가, 01: 시장가)
+            ord_qty: 주문수량
+            ord_unpr: 주문단가 (시장가는 0)
+
+        Returns:
+            정정 결과
+        """
+        try:
+            # Simulation 모드: API 호출 없이 mock 주문번호 반환 (테스트용)
+            if self._simulation_mode:
+                sim_order_no = f"SIM-MOD-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"
+                logger.info(
+                    f"[SIMULATION] 주문 정정 시뮬레이션: "
+                    f"종목={stock_code}, 수량={ord_qty}, 가격={ord_unpr}, "
+                    f"원주문번호={order_no}, 새주문번호={sim_order_no}"
+                )
+                return {
+                    "success": True,
+                    "order_no": sim_order_no,
+                    "order_time": datetime.now().strftime("%H%M%S"),
+                    "raw_response": {"simulation": True}
+                }
+
+            # Base URL 및 TR_ID 설정 (account_type에 따라)
+            # real: 실전투자 / paper: 모의투자
+            if account_type == "real":
+                base_url = KIS_BASE_URL
+                tr_id = "TTTC0013U"  # 실전 주문 정정취소
+            else:
+                # paper (모의투자)
+                base_url = KIS_PAPER_URL
+                tr_id = "VTTC0013U"  # 모의 주문 정정취소
+
+            url = f"{base_url}/uapi/domestic-stock/v1/trading/order-rvsecncl"
+
+            headers = {
+                "authorization": f"Bearer {access_token}",
+                "appkey": appkey,
+                "appsecret": "",  # 주문 API에서는 appsecret 불필요
+                "tr_id": tr_id,
+                "custtype": "P",  # 개인
+            }
+
+            # 주문 정정 파라미터 (대문자 필수)
+            params = {
+                "CANO": cano,  # 종합계좌번호
+                "ACNT_PRDT_CD": acnt_prdt_cd,  # 계좌상품코드
+                "KRX_FWDG_ORD_ORGNO": "",  # KRX 전송 주문 조직번호 (빈값)
+                "ORGN_ODNO": order_no,  # 원주문번호 (정정할 주문번호)
+                "ORD_DVSN": ord_dvsn,  # 주문구분 (00: 지정가, 01: 시장가)
+                "RVSE_CNCL_DVSN_CD": "01",  # 정정취소구분코드 (01: 정정)
+                "ORD_QTY": ord_qty,  # 주문수량
+                "ORD_UNPR": ord_unpr,  # 주문단가 (시장가는 0)
+                "QTY_ALL_ORD_YN": "Y",  # 잔량전부주문여부 (Y: 전량)
+                "EXCG_ID_DVSN_CD": "KRX",  # 거래소ID구분코드
+            }
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, headers=headers, json=params)
+                response.raise_for_status()
+                data = response.json()
+
+            # 응답 확인
+            if data.get("rt_cd") == "0":  # 성공
+                output = data.get("output", {})
+                return {
+                    "success": True,
+                    "order_no": output.get("ODNO"),  # 새 주문번호
+                    "order_time": output.get("ORD_TMD"),  # 주문시각
+                    "raw_response": data
+                }
+            else:
+                error_msg = data.get("msg1", "주문 정정 실패")
+                error_code = data.get("rt_cd", "N/A")
+                logger.error(
+                    f"KIS API 주문 정정 실패: "
+                    f"rt_cd={error_code}, "
+                    f"msg1={error_msg}, "
+                    f"stock_code={stock_code}, "
+                    f"order_no={order_no}"
+                )
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "error_code": error_code,
+                    "raw_response": data
+                }
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"KIS API HTTP 오류: {e.response.status_code}, {e.response.text}")
+            return {
+                "success": False,
+                "error": f"HTTP {e.response.status_code}: {str(e)}"
+            }
+        except Exception as e:
+            logger.error(f"KIS API 주문 정정 오류: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
 
 # 싱글톤 인스턴스
 _order_api_instance: Optional[OrderAPI] = None

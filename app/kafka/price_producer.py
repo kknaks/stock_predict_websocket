@@ -61,6 +61,7 @@ class PriceProducer:
         """Producer 중지"""
         if self._producer:
             await self._producer.stop()
+            self._producer = None  # 재시작 가능하도록 None으로 설정
             logger.info("Price producer stopped")
 
     async def send_price(self, price_message: PriceMessage) -> bool:
