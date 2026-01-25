@@ -90,9 +90,9 @@ class AccountWebSocketClient:
         self._redis_manager = get_redis_manager()
         self._order_signal_producer = get_order_signal_producer()
         
-        # 복호화 키 및 IV 저장
-        self._decrypt_key: Optional[bytes] = None
-        self._decrypt_iv: Optional[bytes] = None
+        # 복호화 키 및 IV 저장 (문자열로 저장, MCP 공식 코드 기준)
+        self._decrypt_key: Optional[str] = None
+        self._decrypt_iv: Optional[str] = None
 
     async def connect_and_run(self) -> None:
         """연결 및 실행"""
@@ -345,9 +345,9 @@ class AccountWebSocketClient:
                         iv_str = output.get("iv")
                         if key_str and iv_str:
                             try:
-                                # Base64 디코딩
-                                self._decrypt_key = base64.b64decode(key_str)
-                                self._decrypt_iv = base64.b64decode(iv_str)
+                                # 문자열 그대로 저장 (MCP 공식 코드 기준)
+                                self._decrypt_key = key_str
+                                self._decrypt_iv = iv_str
                                 logger.info(
                                     f"Decryption key and IV saved ({self.account_no}): "
                                     f"key_length={len(self._decrypt_key)}, "
@@ -463,76 +463,75 @@ class AccountWebSocketClient:
 
     def _decrypt_message(self, encrypted_data: str) -> str:
         """
-        AES256 CBC 모드로 암호화된 메시지 복호화
-        
+        AES256 CBC 모드로 암호화된 메시지 복호화 (MCP 공식 코드 기준)
+
         Args:
             encrypted_data: Base64로 인코딩된 암호화된 데이터
-            
+
         Returns:
-            복호화된 문자열 (파이프(|)로 구분된 데이터)
+            복호화된 문자열 (^로 구분된 필드들)
         """
         if not self._decrypt_key or not self._decrypt_iv:
             raise ValueError("Decryption key or IV not available")
-        
+
         try:
-            # Base64 디코딩
-            encrypted_bytes = base64.b64decode(encrypted_data)
-            
-            # AES CBC 모드로 복호화
-            cipher = AES.new(self._decrypt_key, AES.MODE_CBC, self._decrypt_iv)
-            decrypted_bytes = cipher.decrypt(encrypted_bytes)
-            
-            # PKCS7 패딩 제거
+            # MCP 공식 코드: key.encode('utf-8'), iv.encode('utf-8') 사용
+            cipher = AES.new(
+                self._decrypt_key.encode('utf-8'),
+                AES.MODE_CBC,
+                self._decrypt_iv.encode('utf-8')
+            )
+            decrypted_bytes = cipher.decrypt(base64.b64decode(encrypted_data))
             decrypted_text = unpad(decrypted_bytes, AES.block_size).decode('utf-8')
-            
+
             return decrypted_text
         except Exception as e:
             logger.error(f"Failed to decrypt message ({self.account_no}): {e}")
             raise
 
-    def _parse_execution_notice(self, decrypted_data: str) -> dict:
+    def _parse_execution_notice(self, decrypted_data: str, tr_id: str = "", data_count: str = "") -> list[dict]:
         """
-        복호화된 체결통보 메시지 파싱
-        
-        KIS API 체결통보 형식:
-        - 암호화 여부 (0: 암호화 안됨, 1: 암호화됨) | TR_ID | 데이터건수 | 응답데이터(^로 구분)
-        
+        복호화된 체결통보 메시지 파싱 (MCP 공식 코드 기준)
+
+        MCP 공식 코드에서는 pd.read_csv를 사용하여 여러 건을 처리합니다.
+        여러 건의 데이터는 줄바꿈(\\n)으로 구분되고, 각 건의 필드는 ^로 구분됩니다.
+
         응답데이터 컬럼 (26개):
         CUST_ID | ACNT_NO | ODER_NO | ODER_QTY | SELN_BYOV_CLS | RCTF_CLS |
         ODER_KIND | ODER_COND | STCK_SHRN_ISCD | CNTG_QTY | CNTG_UNPR |
         STCK_CNTG_HOUR | RFUS_YN | CNTG_YN | ACPT_YN | BRNC_NO | ACNT_NO2 |
         ACNT_NAME | ORD_COND_PRC | ORD_EXG_GB | POPUP_YN | FILLER | CRDT_CLS |
         CRDT_LOAN_DATE | CNTG_ISNM40 | ODER_PRC
-        
+
         Args:
-            decrypted_data: 복호화된 메시지 (파이프로 구분)
-            
+            decrypted_data: 복호화된 메시지 (^로 구분된 필드들, 여러 건은 \\n으로 구분)
+            tr_id: TR ID
+            data_count: 데이터 건수
+
         Returns:
-            파싱된 체결통보 데이터 딕셔너리
+            파싱된 체결통보 데이터 딕셔너리 리스트
         """
-        parts = decrypted_data.split('|')
-        
-        if len(parts) < 4:
-            raise ValueError(f"Invalid message format: expected at least 4 parts, got {len(parts)}")
-        
-        is_encrypted = parts[0].strip()
-        tr_id = parts[1].strip()
-        data_count = parts[2].strip()
-        response_data = parts[3].strip() if len(parts) > 3 else ""
-        
-        # 응답 데이터 파싱 (^로 구분)
-        if response_data:
-            data_fields = response_data.split('^')
-            
-            # 컬럼명 정의
-            columns = [
-                "CUST_ID", "ACNT_NO", "ODER_NO", "ODER_QTY", "SELN_BYOV_CLS", "RCTF_CLS",
-                "ODER_KIND", "ODER_COND", "STCK_SHRN_ISCD", "CNTG_QTY", "CNTG_UNPR",
-                "STCK_CNTG_HOUR", "RFUS_YN", "CNTG_YN", "ACPT_YN", "BRNC_NO", "ACNT_NO2",
-                "ACNT_NAME", "ORD_COND_PRC", "ORD_EXG_GB", "POPUP_YN", "FILLER", "CRDT_CLS",
-                "CRDT_LOAN_DATE", "CNTG_ISNM40", "ODER_PRC"
-            ]
-            
+        # 컬럼명 정의 (MCP 공식 코드 기준 26개)
+        columns = [
+            "CUST_ID", "ACNT_NO", "ODER_NO", "ODER_QTY", "SELN_BYOV_CLS", "RCTF_CLS",
+            "ODER_KIND", "ODER_COND", "STCK_SHRN_ISCD", "CNTG_QTY", "CNTG_UNPR",
+            "STCK_CNTG_HOUR", "RFUS_YN", "CNTG_YN", "ACPT_YN", "BRNC_NO", "ACNT_NO2",
+            "ACNT_NAME", "ORD_COND_PRC", "ORD_EXG_GB", "POPUP_YN", "FILLER", "CRDT_CLS",
+            "CRDT_LOAN_DATE", "CNTG_ISNM40", "ODER_PRC"
+        ]
+
+        result_list = []
+
+        # 여러 건의 데이터는 줄바꿈으로 구분 (MCP 공식 코드: pd.read_csv 사용)
+        lines = decrypted_data.strip().split('\n') if '\n' in decrypted_data else [decrypted_data]
+
+        for line in lines:
+            if not line.strip():
+                continue
+
+            # ^로 구분된 필드들 파싱
+            data_fields = line.split('^')
+
             # 딕셔너리로 변환
             parsed_data = {}
             for i, column in enumerate(columns):
@@ -540,60 +539,69 @@ class AccountWebSocketClient:
                     parsed_data[column] = data_fields[i].strip()
                 else:
                     parsed_data[column] = ""
-            
+
             # 추가 메타데이터
             parsed_data["_meta"] = {
-                "is_encrypted": is_encrypted,
                 "tr_id": tr_id,
                 "data_count": data_count,
             }
-            
-            return parsed_data
-        else:
-            return {
-                "_meta": {
-                    "is_encrypted": is_encrypted,
-                    "tr_id": tr_id,
-                    "data_count": data_count,
-                }
-            }
+
+            result_list.append(parsed_data)
+
+        return result_list
 
     async def _handle_message(self, message: str) -> None:
-        """메시지 처리 (체결통보 수신)"""
+        """메시지 처리 (체결통보 수신) - MCP 공식 코드 기준"""
         try:
             # 먼저 JSON 파싱 시도
             try:
                 data = json.loads(message)
             except json.JSONDecodeError:
-                # JSON이 아니면 암호화된 메시지일 수 있음
-                # KIS API는 파이프(|)로 시작하는 경우가 있음
-                if message.startswith('0|') or message.startswith('1|'):
-                    # 암호화 여부 확인 (0: 암호화 안됨, 1: 암호화됨)
-                    is_encrypted = message[0] == '1'
-                    
-                    if is_encrypted:
+                # JSON이 아니면 실시간 데이터 메시지
+                # MCP 공식 코드: if raw[0] in ["0", "1"]:
+                if message[0] in ["0", "1"]:
+                    # MCP 공식 코드: d1 = raw.split("|")
+                    parts = message.split("|")
+                    if len(parts) < 4:
+                        logger.warning(
+                            f"Invalid message format ({self.account_no}): expected at least 4 parts, got {len(parts)}"
+                        )
+                        return
+
+                    is_encrypted = parts[0]  # "0" 또는 "1"
+                    tr_id = parts[1]
+                    data_count = parts[2]
+                    encrypted_data = parts[3]  # 암호화된 데이터 부분
+
+                    # MCP 공식 코드: if dm.get("encrypt", None) == "Y":
+                    if is_encrypted == "1":
                         # 암호화된 메시지 복호화
                         if not self._decrypt_key or not self._decrypt_iv:
                             logger.warning(
                                 f"Encrypted message received but no decryption key available ({self.account_no})"
                             )
                             return
-                        
+
                         try:
-                            decrypted_data = self._decrypt_message(message[2:])  # '1|' 제거
-                            parsed_data = self._parse_execution_notice(decrypted_data)
-                            
+                            # MCP 공식 코드: d = aes_cbc_base64_dec(dm["key"], dm["iv"], d)
+                            decrypted_data = self._decrypt_message(encrypted_data)
+                            parsed_data_list = self._parse_execution_notice(decrypted_data, tr_id, data_count)
+
                             logger.info(
                                 f"📨 복호화된 체결통보 ({self.account_no}): "
-                                f"tr_id={parsed_data.get('_meta', {}).get('tr_id')}, "
-                                f"종목코드={parsed_data.get('STCK_SHRN_ISCD')}, "
-                                f"주문번호={parsed_data.get('ODER_NO')}, "
-                                f"체결수량={parsed_data.get('CNTG_QTY')}, "
-                                f"체결단가={parsed_data.get('CNTG_UNPR')}"
+                                f"tr_id={tr_id}, "
+                                f"건수={len(parsed_data_list)}"
                             )
-                            
-                            # 파싱된 데이터로 체결통보 처리
-                            await self._process_execution_notice(parsed_data)
+
+                            # 파싱된 데이터로 체결통보 처리 (여러 건 처리)
+                            for parsed_data in parsed_data_list:
+                                logger.info(
+                                    f"  → 종목코드={parsed_data.get('STCK_SHRN_ISCD')}, "
+                                    f"주문번호={parsed_data.get('ODER_NO')}, "
+                                    f"체결수량={parsed_data.get('CNTG_QTY')}, "
+                                    f"체결단가={parsed_data.get('CNTG_UNPR')}"
+                                )
+                                await self._process_execution_notice(parsed_data)
                             return
                         except Exception as e:
                             logger.error(
@@ -602,9 +610,10 @@ class AccountWebSocketClient:
                             )
                             return
                     else:
-                        # 암호화되지 않은 메시지
-                        parsed_data = self._parse_execution_notice(message[2:])  # '0|' 제거
-                        await self._process_execution_notice(parsed_data)
+                        # 암호화되지 않은 메시지 (is_encrypted == "0")
+                        parsed_data_list = self._parse_execution_notice(encrypted_data, tr_id, data_count)
+                        for parsed_data in parsed_data_list:
+                            await self._process_execution_notice(parsed_data)
                         return
                 else:
                     # 알 수 없는 형식
@@ -630,8 +639,9 @@ class AccountWebSocketClient:
                 if encrypted_data and self._decrypt_key and self._decrypt_iv:
                     try:
                         decrypted_data = self._decrypt_message(encrypted_data)
-                        parsed_data = self._parse_execution_notice(decrypted_data)
-                        await self._process_execution_notice(parsed_data)
+                        parsed_data_list = self._parse_execution_notice(decrypted_data)
+                        for parsed_data in parsed_data_list:
+                            await self._process_execution_notice(parsed_data)
                         return
                     except Exception as e:
                         logger.error(
@@ -948,22 +958,17 @@ class AccountWebSocketClient:
                 if data.get("hts_id") and not self.hts_id:
                     self.hts_id = data.get("hts_id")
                     logger.debug(f"Restored hts_id from Redis for {self.account_no}")
-                # Redis에서 복호화 키 및 IV 복원
+                # Redis에서 복호화 키 및 IV 복원 (문자열 그대로 저장됨)
                 decrypt_key_str = data.get("decrypt_key")
                 decrypt_iv_str = data.get("decrypt_iv")
                 if decrypt_key_str and decrypt_iv_str:
-                    try:
-                        self._decrypt_key = base64.b64decode(decrypt_key_str)
-                        self._decrypt_iv = base64.b64decode(decrypt_iv_str)
-                        logger.info(
-                            f"Restored decryption key and IV from Redis ({self.account_no}): "
-                            f"key_length={len(self._decrypt_key)}, "
-                            f"iv_length={len(self._decrypt_iv)}"
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to restore decryption key/IV from Redis ({self.account_no}): {e}"
-                        )
+                    self._decrypt_key = decrypt_key_str
+                    self._decrypt_iv = decrypt_iv_str
+                    logger.info(
+                        f"Restored decryption key and IV from Redis ({self.account_no}): "
+                        f"key_length={len(self._decrypt_key)}, "
+                        f"iv_length={len(self._decrypt_iv)}"
+                    )
         except Exception as e:
             logger.warning(f"Failed to load connection info from Redis ({self.account_no}): {e}")
 
