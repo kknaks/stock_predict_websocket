@@ -39,6 +39,8 @@ class Settings(BaseSettings):
 
     topic_prediction_result: str = "ai_prediction_result"
     topic_price: str = "stock_price"
+    topic_asking_price: str = "stock_asking_price"
+    topic_manual_sell: str = "manual-sell-signal"
 
     # -------------------------------------------
     # Redis

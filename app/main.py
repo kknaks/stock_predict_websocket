@@ -16,6 +16,7 @@ from websockets.server import WebSocketServerProtocol as WebSocketServerProtocol
 
 from app.config.settings import settings
 from app.kafka import get_predict_consumer, get_websocket_consumer
+from app.kafka.manual_sell_consumer import get_manual_sell_consumer
 from app.handler.prediction_handler import get_prediction_handler
 from app.handler.websocket_handler import get_websocket_handler
 
@@ -143,6 +144,16 @@ async def main():
     else:
         logger.warning("Failed to connect to WebSocket Kafka")
 
+    # 수동 매도 Kafka consumer 시작
+    manual_sell_consumer = get_manual_sell_consumer()
+    manual_sell_connected = await manual_sell_consumer.start()
+    manual_sell_task: Optional[asyncio.Task] = None
+    if manual_sell_connected:
+        logger.info("Manual Sell Kafka connection established")
+        manual_sell_task = asyncio.create_task(manual_sell_consumer.consume())
+    else:
+        logger.warning("Failed to connect to Manual Sell Kafka")
+
     # WebSocket 서버 시작
     async with websockets.serve(
         websocket_handler,
@@ -177,6 +188,15 @@ async def main():
         except asyncio.CancelledError:
             pass
     await websocket_consumer.stop()
+
+    # 수동 매도 Consumer 정리
+    if manual_sell_task:
+        manual_sell_task.cancel()
+        try:
+            await manual_sell_task
+        except asyncio.CancelledError:
+            pass
+    await manual_sell_consumer.stop()
 
     logger.info("Server shutdown complete")
 

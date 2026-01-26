@@ -25,7 +25,9 @@ from app.kis.websocket.redis_manager import get_redis_manager
 from app.service.signal_execute import get_signal_executor
 from app.utils.send_slack import send_slack
 from app.kafka.price_producer import get_price_producer
+from app.kafka.asking_price_producer import get_asking_price_producer
 from app.models.price import PriceMessage
+from app.models.asking_price import AskingPriceMessage
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +77,7 @@ class PriceWebSocketClient:
         
         # Kafka Producer
         self._price_producer = get_price_producer()
+        self._asking_price_producer = get_asking_price_producer()
 
     async def connect_and_run(self) -> None:
         """연결 및 실행"""
@@ -536,8 +539,8 @@ class PriceWebSocketClient:
                                         f"매도1호가={parsed_data.get('ASKP1')}, "
                                         f"매수1호가={parsed_data.get('BIDP1')}"
                                     )
-                                    # TODO: Kafka Producer로 전송
-                                    # await self._send_to_kafka(parsed_data)
+                                    # Kafka Producer로 전송
+                                    await self._send_asking_price_to_kafka(parsed_data)
                             else:
                                 logger.warning(
                                     f"레코드 {i+1}/{record_count} 필드 부족: "
@@ -1121,6 +1124,14 @@ class PriceWebSocketClient:
             await self._price_producer.send_price(price_message)
         except Exception as e:
             logger.error(f"Failed to send price data to Kafka: {e}", exc_info=True)
+
+    async def _send_asking_price_to_kafka(self, parsed_data: dict) -> None:
+        """파싱된 호가 데이터를 Kafka로 전송"""
+        try:
+            asking_price_message = AskingPriceMessage.from_parsed_data(parsed_data)
+            await self._asking_price_producer.send_asking_price(asking_price_message)
+        except Exception as e:
+            logger.error(f"Failed to send asking price data to Kafka: {e}", exc_info=True)
 
     @property
     def reconnect_attempts(self) -> int:

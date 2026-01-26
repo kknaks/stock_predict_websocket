@@ -37,6 +37,14 @@ class KafkaConfig:
     def topic_price(self) -> str:
         return settings.topic_price
 
+    @property
+    def topic_asking_price(self) -> str:
+        return settings.topic_asking_price
+
+    @property
+    def topic_manual_sell(self) -> str:
+        return settings.topic_manual_sell
+
 
 _config_instance: KafkaConfig | None = None
 

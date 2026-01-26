@@ -246,6 +246,7 @@ class OrderAPI:
                 account_no = account_connection.get("account_no")
                 account_product_code = account_connection.get("account_product_code")
                 appkey = account_connection.get("appkey")
+                appsecret = account_connection.get("appsecret")
                 access_token = account_connection.get("access_token")
 
                 # 계좌번호 분리 (12345678-01 -> cano=12345678, acnt_prdt_cd=01)
@@ -270,6 +271,7 @@ class OrderAPI:
                     cano=cano,
                     acnt_prdt_cd=acnt_prdt_cd,
                     appkey=appkey,
+                    appsecret=appsecret,
                     access_token=access_token,
                     stock_code=stock_code,
                     ord_dvsn=ord_dvsn,
@@ -362,6 +364,7 @@ class OrderAPI:
         cano: str,
         acnt_prdt_cd: str,
         appkey: str,
+        appsecret: str,
         access_token: str,
         stock_code: str,
         ord_dvsn: str,
@@ -376,6 +379,7 @@ class OrderAPI:
             cano: 종합계좌번호
             acnt_prdt_cd: 계좌상품코드
             appkey: 앱키
+            appsecret: 앱시크릿
             access_token: 액세스 토큰
             stock_code: 종목코드
             ord_dvsn: 주문구분
@@ -416,7 +420,7 @@ class OrderAPI:
             headers = {
                 "authorization": f"Bearer {access_token}",
                 "appkey": appkey,
-                "appsecret": "",  # 주문 API에서는 appsecret 불필요
+                "appsecret": appsecret,
                 "tr_id": tr_id,
                 "custtype": "P",  # 개인
             }
@@ -430,9 +434,7 @@ class OrderAPI:
                 "ORD_QTY": ord_qty,  # 주문수량
                 "ORD_UNPR": ord_unpr,  # 주문단가
                 "EXCG_ID_DVSN_CD": "KRX",  # 거래소ID구분코드
-                "CTAC_TLNO": "",  # 연락전화번호 (선택)
                 "SLL_TYPE": "",  # 매도유형 (매수 시 빈값)
-                "ALGO_NO": ""  # 알고리즘번호 (선택)
             }
 
             async with httpx.AsyncClient() as client:
@@ -594,7 +596,15 @@ class OrderAPI:
                 mock_order_no = f"MOCK-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"
 
                 # 체결 가격 결정 (시장가인 경우 현재가 사용)
-                exec_price = order_price if order_price > 0 else int(signal.current_price)
+                exec_price = order_price
+                if exec_price <= 0:
+                    # 1순위: signal의 현재가
+                    exec_price = int(signal.current_price) if signal.current_price > 0 else 0
+                if exec_price <= 0:
+                    # 2순위: Redis에서 실시간 현재가 조회
+                    redis_price = self._redis_manager.get_current_price(stock_code)
+                    if redis_price:
+                        exec_price = int(redis_price)
 
                 logger.info(
                     f"[MOCK] 매도 주문 가정: "
@@ -701,6 +711,7 @@ class OrderAPI:
                 account_no = account_connection.get("account_no")
                 account_product_code = account_connection.get("account_product_code")
                 appkey = account_connection.get("appkey")
+                appsecret = account_connection.get("appsecret")
                 access_token = account_connection.get("access_token")
 
                 # 계좌번호 분리 (12345678-01 -> cano=12345678, acnt_prdt_cd=01)
@@ -725,6 +736,7 @@ class OrderAPI:
                     cano=cano,
                     acnt_prdt_cd=acnt_prdt_cd,
                     appkey=appkey,
+                    appsecret=appsecret,
                     access_token=access_token,
                     stock_code=stock_code,
                     ord_dvsn=ord_dvsn,
@@ -817,6 +829,7 @@ class OrderAPI:
         cano: str,
         acnt_prdt_cd: str,
         appkey: str,
+        appsecret: str,
         access_token: str,
         stock_code: str,
         ord_dvsn: str,
@@ -831,6 +844,7 @@ class OrderAPI:
             cano: 종합계좌번호
             acnt_prdt_cd: 계좌상품코드
             appkey: 앱키
+            appsecret: 앱시크릿
             access_token: 액세스 토큰
             stock_code: 종목코드
             ord_dvsn: 주문구분
@@ -871,7 +885,7 @@ class OrderAPI:
             headers = {
                 "authorization": f"Bearer {access_token}",
                 "appkey": appkey,
-                "appsecret": "",  # 주문 API에서는 appsecret 불필요
+                "appsecret": appsecret,
                 "tr_id": tr_id,
                 "custtype": "P",  # 개인
             }
@@ -994,6 +1008,7 @@ class OrderAPI:
                 account_no = account_connection.get("account_no")
                 account_product_code = account_connection.get("account_product_code")
                 appkey = account_connection.get("appkey")
+                appsecret = account_connection.get("appsecret")
                 access_token = account_connection.get("access_token")
 
                 # 계좌번호 분리 (12345678-01 -> cano=12345678, acnt_prdt_cd=01)
@@ -1018,6 +1033,7 @@ class OrderAPI:
                     cano=cano,
                     acnt_prdt_cd=acnt_prdt_cd,
                     appkey=appkey,
+                    appsecret=appsecret,
                     access_token=access_token,
                     stock_code=stock_code,
                     order_no=order_no
@@ -1062,6 +1078,7 @@ class OrderAPI:
         cano: str,
         acnt_prdt_cd: str,
         appkey: str,
+        appsecret: str,
         access_token: str,
         stock_code: str,
         order_no: str
@@ -1074,6 +1091,7 @@ class OrderAPI:
             cano: 종합계좌번호
             acnt_prdt_cd: 계좌상품코드
             appkey: 앱키
+            appsecret: 앱시크릿
             access_token: 액세스 토큰
             stock_code: 종목코드
             order_no: 주문번호
@@ -1097,7 +1115,7 @@ class OrderAPI:
             headers = {
                 "authorization": f"Bearer {access_token}",
                 "appkey": appkey,
-                "appsecret": "",  # 주문 API에서는 appsecret 불필요
+                "appsecret": appsecret,
                 "tr_id": tr_id,
                 "custtype": "P",  # 개인
             }
@@ -1227,6 +1245,7 @@ class OrderAPI:
                 account_no = account_connection.get("account_no")
                 account_product_code = account_connection.get("account_product_code")
                 appkey = account_connection.get("appkey")
+                appsecret = account_connection.get("appsecret")
                 access_token = account_connection.get("access_token")
 
                 # 계좌번호 분리 (12345678-01 -> cano=12345678, acnt_prdt_cd=01)
@@ -1251,6 +1270,7 @@ class OrderAPI:
                     cano=cano,
                     acnt_prdt_cd=acnt_prdt_cd,
                     appkey=appkey,
+                    appsecret=appsecret,
                     access_token=access_token,
                     stock_code=stock_code,
                     order_no=order_no,
@@ -1298,6 +1318,7 @@ class OrderAPI:
         cano: str,
         acnt_prdt_cd: str,
         appkey: str,
+        appsecret: str,
         access_token: str,
         stock_code: str,
         order_no: str,
@@ -1313,6 +1334,7 @@ class OrderAPI:
             cano: 종합계좌번호
             acnt_prdt_cd: 계좌상품코드
             appkey: 앱키
+            appsecret: 앱시크릿
             access_token: 액세스 토큰
             stock_code: 종목코드
             order_no: 원주문번호
@@ -1354,7 +1376,7 @@ class OrderAPI:
             headers = {
                 "authorization": f"Bearer {access_token}",
                 "appkey": appkey,
-                "appsecret": "",  # 주문 API에서는 appsecret 불필요
+                "appsecret": appsecret,
                 "tr_id": tr_id,
                 "custtype": "P",  # 개인
             }

@@ -20,6 +20,7 @@ from app.kis.websocket.exceptions import (
 from app.kis.websocket.error_stats import get_error_stats
 from app.kis.websocket.redis_manager import get_redis_manager
 from app.kafka.price_producer import get_price_producer
+from app.kafka.asking_price_producer import get_asking_price_producer
 from app.kafka.order_signal_producer import get_order_signal_producer
 from app.kafka.daily_strategy_producer import get_daily_strategy_producer
 
@@ -478,6 +479,7 @@ class WebSocketManager:
                         account_no=account.account_no,
                         account_product_code=account.account_product_code,
                         access_token=account.access_token,
+                        appsecret=account.app_secret,
                         user_id=user.user_id,
                         user_strategy_ids=user_strategy_ids,
                         hts_id=account.hts_id,
@@ -537,6 +539,14 @@ class WebSocketManager:
             logger.error(f"Failed to start price producer: {e}")
 
         try:
+            asking_price_producer = get_asking_price_producer()
+            if not asking_price_producer._producer:
+                await asking_price_producer.start()
+                logger.info("Asking price producer started")
+        except Exception as e:
+            logger.error(f"Failed to start asking price producer: {e}")
+
+        try:
             order_signal_producer = get_order_signal_producer()
             if not order_signal_producer._producer:
                 await order_signal_producer.start()
@@ -560,6 +570,13 @@ class WebSocketManager:
             logger.info("Price producer stopped")
         except Exception as e:
             logger.warning(f"Error stopping price producer: {e}")
+
+        try:
+            asking_price_producer = get_asking_price_producer()
+            await asking_price_producer.stop()
+            logger.info("Asking price producer stopped")
+        except Exception as e:
+            logger.warning(f"Error stopping asking price producer: {e}")
 
         try:
             order_signal_producer = get_order_signal_producer()

@@ -43,6 +43,7 @@ class AccountWebSocketClient:
         account_type: str = "mock",
         is_mock: bool = False,
         access_token: Optional[str] = None,
+        appsecret: Optional[str] = None,
         user_id: Optional[int] = None,
         user_strategy_ids: Optional[list] = None,
         hts_id: Optional[str] = None,
@@ -56,6 +57,7 @@ class AccountWebSocketClient:
             account_product_code: 계좌상품코드
             account_type: 계좌유형 (real: 실전, paper: 모의, mock: 테스트)
             access_token: OAuth 액세스 토큰 (API 주문용)
+            appsecret: 앱시크릿 (API 주문용)
             user_id: 사용자 ID
             user_strategy_ids: 사용자 전략 ID 리스트
             hts_id: 고객ID (체결통보 구독용, tr_key에 사용)
@@ -68,6 +70,7 @@ class AccountWebSocketClient:
         self.account_type = account_type
         self.is_mock = is_mock
         self.access_token = access_token
+        self.appsecret = appsecret
         self.user_id = user_id
         self.user_strategy_ids = user_strategy_ids or []
         self.hts_id = hts_id
@@ -226,6 +229,7 @@ class AccountWebSocketClient:
                 account_type=self.account_type,
                 account_product_code=self.account_product_code,
                 access_token=self.access_token,
+                appsecret=self.appsecret,
                 user_id=self.user_id,
                 user_strategy_ids=self.user_strategy_ids,
                 hts_id=self.hts_id,
@@ -364,6 +368,7 @@ class AccountWebSocketClient:
                                     account_type=self.account_type,
                                     account_product_code=self.account_product_code,
                                     access_token=self.access_token,
+                                    appsecret=self.appsecret,
                                     user_id=self.user_id,
                                     user_strategy_ids=self.user_strategy_ids,
                                     hts_id=self.hts_id,

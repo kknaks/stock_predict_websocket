@@ -139,6 +139,71 @@ class WebSocketRedisManager:
             logger.error(f"Unexpected error getting price connection: {e}", exc_info=True)
             return None
 
+    def get_current_price(self, stock_code: str) -> Optional[float]:
+        """
+        종목의 현재가 조회
+
+        Args:
+            stock_code: 종목 코드
+
+        Returns:
+            현재가 또는 None
+        """
+        if not self._redis_client:
+            logger.warning("Redis not connected, cannot get current price")
+            return None
+
+        try:
+            redis_key = f"websocket:price_data:{stock_code}"
+            data = self._redis_client.get(redis_key)
+            if data:
+                price_data = json.loads(data)
+                current_price = price_data.get("STCK_PRPR")
+                if current_price:
+                    return float(current_price)
+            return None
+
+        except RedisError as e:
+            logger.error(f"Failed to get current price from Redis: {e}")
+            return None
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Failed to parse price data: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error getting current price: {e}", exc_info=True)
+            return None
+
+    def get_price_data(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """
+        종목의 전체 가격 데이터 조회
+
+        Args:
+            stock_code: 종목 코드
+
+        Returns:
+            가격 데이터 딕셔너리 또는 None
+        """
+        if not self._redis_client:
+            logger.warning("Redis not connected, cannot get price data")
+            return None
+
+        try:
+            redis_key = f"websocket:price_data:{stock_code}"
+            data = self._redis_client.get(redis_key)
+            if data:
+                return json.loads(data)
+            return None
+
+        except RedisError as e:
+            logger.error(f"Failed to get price data from Redis: {e}")
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse price data: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error getting price data: {e}", exc_info=True)
+            return None
+
     def save_account_connection(
         self,
         account_no: str,
@@ -149,6 +214,7 @@ class WebSocketRedisManager:
         is_mock: bool = False,
         account_type: str = "mock",
         access_token: Optional[str] = None,
+        appsecret: Optional[str] = None,
         user_id: Optional[int] = None,
         user_strategy_ids: Optional[list] = None,
         hts_id: Optional[str] = None,
@@ -169,6 +235,7 @@ class WebSocketRedisManager:
             is_mock: 모의 여부
             account_type: 계좌 유형 (real/paper/mock)
             access_token: OAuth 액세스 토큰 (API 주문용)
+            appsecret: 앱시크릿 (API 주문용)
             user_id: 사용자 ID
             user_strategy_ids: 사용자 전략 ID 리스트
             hts_id: 고객ID (체결통보 구독용)
@@ -201,7 +268,11 @@ class WebSocketRedisManager:
             # access_token이 있으면 추가
             if access_token:
                 data["access_token"] = access_token
-            
+
+            # appsecret이 있으면 추가
+            if appsecret:
+                data["appsecret"] = appsecret
+
             # user_id가 있으면 추가
             if user_id is not None:
                 data["user_id"] = user_id
@@ -1698,6 +1769,21 @@ class WebSocketRedisManager:
         except Exception as e:
             logger.error(f"Failed to get daily strategy: {e}", exc_info=True)
             return None
+
+    def get_user_strategy_id_by_daily(self, daily_strategy_id: int) -> Optional[int]:
+        """
+        daily_strategy_id로 user_strategy_id 조회
+
+        Args:
+            daily_strategy_id: 일일 전략 ID
+
+        Returns:
+            user_strategy_id 또는 None
+        """
+        daily_strategy = self.get_daily_strategy(daily_strategy_id)
+        if daily_strategy:
+            return daily_strategy.get("user_strategy_id")
+        return None
 
     def generate_daily_strategy_id(self) -> int:
         """

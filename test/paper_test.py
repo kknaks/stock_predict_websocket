@@ -113,6 +113,7 @@ class PaperWebSocketHandler:
                             is_mock=is_mock,
                             account_type=account_type.lower(),
                             access_token=account.access_token,
+                            appsecret=account.app_secret or "",
                             user_id=user.user_id,
                             user_strategy_ids=user_strategy_ids,
                             hts_id=account.hts_id,
