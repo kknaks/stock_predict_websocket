@@ -3,7 +3,7 @@ AI 예측 결과 모델
 """
 
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 
 
@@ -18,6 +18,7 @@ class PredictionItem(BaseModel):
     date: str
     gap_rate: float
     stock_open: int
+    avg_volume_20d: Optional[int] = None  # 20일 평균 거래량
     prob_up: float
     prob_down: float
     predicted_direction: int

@@ -108,11 +108,11 @@ class StrategyTable:
         )
 
     def _calculate_target(
-        self, 
-        prediction: PredictionItem, 
+        self,
+        prediction: PredictionItem,
         strategy_config: StrategyConfig,
         weight: float
-    ) -> TargetPrice:
+    ) -> Optional[TargetPrice]:
         """
         예측 데이터로부터 목표가, 매도가, 손절가 계산
 
@@ -143,8 +143,9 @@ class StrategyTable:
         # 수량 = (총 투자 금액 * 비중) / 시가
         if strategy_config.total_investment > 0 and stock_open > 0:
             target_quantity = int((strategy_config.total_investment * weight) / stock_open)
-            # 최소 1주는 보장
-            target_quantity = max(1, target_quantity)
+            # 수량이 0이면 구매 불가 → None 반환하여 제외
+            if target_quantity == 0:
+                return None
         else:
             # 총 투자 금액이 설정되지 않은 경우, 비중만 저장하고 수량은 1로 설정
             # 실제 주문 시 비중을 기반으로 수량을 계산해야 함
@@ -446,14 +447,18 @@ class StrategyTable:
                 continue
             
             # 비중 계산에 필요한 총합을 미리 계산 (해당 전략의 구매 가능한 종목만으로 계산)
+            total_market_cap = 0
+            total_inverse_price = 0
+            total_volume = 0
+
             if strategy_config.strategy_weight_type == "MARKETCAP":
                 total_market_cap = sum(p.market_cap for p in available_predictions)
             elif strategy_config.strategy_weight_type == "PRICE":
                 # 역가중치: 시가가 낮을수록 비중 높음
                 total_inverse_price = sum(1.0 / float(p.stock_open) for p in available_predictions if float(p.stock_open) > 0)
-            else:
-                total_market_cap = 0
-                total_inverse_price = 0
+            elif strategy_config.strategy_weight_type == "VOLUME":
+                # 거래량 비중: 거래량 많을수록 비중 높음
+                total_volume = sum(p.avg_volume_20d for p in available_predictions if p.avg_volume_20d and p.avg_volume_20d > 0)
             
             for prediction in available_predictions:
                 try:
@@ -473,12 +478,31 @@ class StrategyTable:
                             weight = (1.0 / stock_open) / total_inverse_price
                         else:
                             weight = 1.0 / len(available_predictions)
+                    elif strategy_config.strategy_weight_type == "VOLUME":
+                        # 거래량 비중: 거래량 많을수록 비중 높음
+                        volume = prediction.avg_volume_20d
+                        if volume is None or volume <= 0:
+                            # 거래량 데이터 없으면 제외
+                            logger.info(
+                                f"전략 {user_strategy_id}에서 종목 {prediction.stock_code} 제외: "
+                                f"거래량 데이터 없음"
+                            )
+                            continue
+                        weight = volume / total_volume
                     else:
                         weight = 1.0 / len(available_predictions)
                     
                     # 목표가 계산
                     target_price = self._calculate_target(prediction, strategy_config, weight)
-                    
+
+                    # 수량 0으로 구매 불가한 종목은 제외
+                    if target_price is None:
+                        logger.info(
+                            f"전략 {user_strategy_id}에서 종목 {prediction.stock_code} 제외: "
+                            f"투자금 대비 시가가 높아 구매 불가"
+                        )
+                        continue
+
                     # 테이블 업데이트
                     self._update_target(user_strategy_id, target_price)
                 except Exception as e:
