@@ -103,36 +103,42 @@ class KafkaManualSellConsumer:
 
         메시지 형식:
         {
-            "daily_strategy_id": 32,
+            "user_strategy_id": 123,
             "stock_code": "357780",
             "order_type": "LIMIT" | "MARKET",
             "order_price": 340000,  # 지정가인 경우
             "order_quantity": 5     # 생략 시 전량 매도
         }
+
+        처리 방식:
+        - mock: Redis에 수동 매도 타겟 저장 → WebSocket에서 가격 감시 후 주문
+        - real/paper: 현재가 검증 후 바로 API 호출
         """
         try:
             # 필수 필드 검증
-            daily_strategy_id = message.get("daily_strategy_id")
+            user_strategy_id = message.get("user_strategy_id")
             stock_code = message.get("stock_code")
             order_type_str = message.get("order_type", "LIMIT").upper()
             order_price = message.get("order_price", 0)
             order_quantity = message.get("order_quantity")
 
-            if not daily_strategy_id or not stock_code:
-                logger.error(f"Missing required fields: daily_strategy_id={daily_strategy_id}, stock_code={stock_code}")
+            if not user_strategy_id or not stock_code:
+                logger.error(f"Missing required fields: user_strategy_id={user_strategy_id}, stock_code={stock_code}")
                 return
 
-            # user_strategy_id 조회 (daily_strategy_id로부터)
-            user_strategy_id = self._redis_manager.get_user_strategy_id_by_daily(daily_strategy_id)
-            if not user_strategy_id:
-                logger.error(f"user_strategy_id not found for daily_strategy_id={daily_strategy_id}")
+            # daily_strategy_id 조회 (user_strategy_id로부터)
+            daily_strategy_id = self._redis_manager.get_daily_strategy_id(user_strategy_id)
+            if not daily_strategy_id:
+                logger.error(f"daily_strategy_id not found for user_strategy_id={user_strategy_id}")
                 return
 
-            # 현재가 조회
-            current_price = self._redis_manager.get_current_price(stock_code)
-            if not current_price:
-                logger.warning(f"Current price not found for {stock_code}, using order_price")
-                current_price = float(order_price) if order_price else 0
+            # daily_strategy에서 account_type 조회
+            daily_strategy = self._redis_manager.get_daily_strategy(daily_strategy_id)
+            if not daily_strategy:
+                logger.error(f"daily_strategy not found: daily_strategy_id={daily_strategy_id}")
+                return
+
+            account_type = daily_strategy.get("account_type", "mock")
 
             # 주문 수량 결정 (없으면 전량)
             if not order_quantity:
@@ -143,56 +149,144 @@ class KafkaManualSellConsumer:
                     logger.error(f"Position not found and order_quantity not specified")
                     return
 
-            # OrderType 변환
-            if order_type_str == "MARKET":
-                order_type = OrderType.MARKET
-                order_price = 0
-            else:
-                order_type = OrderType.LIMIT
-                if not order_price:
-                    logger.error("order_price required for LIMIT order")
-                    return
+            if order_quantity <= 0:
+                logger.error(f"Invalid order_quantity: {order_quantity}")
+                return
 
-            # SignalResult 생성
-            signal = SignalResult(
-                signal_type="SELL",
-                stock_code=stock_code,
-                current_price=current_price,
-                target_price=None,
-                target_quantity=order_quantity,
-                stop_loss_price=None,
-                recommended_order_price=float(order_price) if order_price else current_price,
-                recommended_order_type=order_type,
-                expected_slippage_pct=0.0,
-                urgency="HIGH",
-                reason="사용자 수동 매도"
-            )
+            # 지정가인 경우 가격 필수
+            if order_type_str == "LIMIT" and not order_price:
+                logger.error("order_price required for LIMIT order")
+                return
 
-            # 종목명 조회
-            position = self._redis_manager.get_position(daily_strategy_id, stock_code)
-            stock_name = position.get("stock_name", "") if position else ""
-
-            # 매도 주문 처리
-            result = await self._order_api.process_sell_order(
-                user_strategy_id=user_strategy_id,
-                signal=signal,
-                order_quantity=order_quantity,
-                stock_name=stock_name
-            )
-
-            if result.get("success"):
-                logger.info(
-                    f"Manual sell order processed: "
-                    f"stock_code={stock_code}, "
-                    f"quantity={order_quantity}, "
-                    f"order_type={order_type_str}, "
-                    f"price={order_price}"
+            # account_type에 따라 분기
+            if account_type == "mock":
+                # Mock 모드: Redis에 수동 매도 타겟 저장 → WebSocket에서 가격 감시
+                await self._handle_mock_manual_sell(
+                    user_strategy_id=user_strategy_id,
+                    stock_code=stock_code,
+                    order_type_str=order_type_str,
+                    order_price=order_price,
+                    order_quantity=order_quantity,
                 )
             else:
-                logger.error(f"Manual sell order failed: {result.get('error')}")
+                # Real/Paper 모드: 현재가 검증 후 바로 API 호출
+                await self._handle_real_manual_sell(
+                    user_strategy_id=user_strategy_id,
+                    daily_strategy_id=daily_strategy_id,
+                    stock_code=stock_code,
+                    order_type_str=order_type_str,
+                    order_price=order_price,
+                    order_quantity=order_quantity,
+                )
 
         except Exception as e:
             logger.error(f"Error handling manual sell: {e}", exc_info=True)
+
+    async def _handle_mock_manual_sell(
+        self,
+        user_strategy_id: int,
+        stock_code: str,
+        order_type_str: str,
+        order_price: float,
+        order_quantity: int,
+    ) -> None:
+        """
+        Mock 모드 수동 매도 처리
+
+        Redis에 수동 매도 타겟 저장 → WebSocket에서 가격 감시 후 주문
+        """
+        # Redis에 수동 매도 타겟 저장
+        success = self._redis_manager.save_manual_sell_target(
+            user_strategy_id=user_strategy_id,
+            stock_code=stock_code,
+            order_type=order_type_str,
+            order_price=order_price,
+            order_quantity=order_quantity,
+        )
+
+        if success:
+            logger.info(
+                f"[MOCK] Manual sell target registered: "
+                f"user_strategy_id={user_strategy_id}, "
+                f"stock_code={stock_code}, "
+                f"order_type={order_type_str}, "
+                f"order_price={order_price}, "
+                f"order_quantity={order_quantity} "
+                f"(waiting for price condition)"
+            )
+        else:
+            logger.error(f"[MOCK] Failed to save manual sell target")
+
+    async def _handle_real_manual_sell(
+        self,
+        user_strategy_id: int,
+        daily_strategy_id: int,
+        stock_code: str,
+        order_type_str: str,
+        order_price: float,
+        order_quantity: int,
+    ) -> None:
+        """
+        Real/Paper 모드 수동 매도 처리
+
+        현재가 검증 후 바로 API 호출
+        """
+        # 현재가 조회
+        current_price = self._redis_manager.get_current_price(stock_code)
+
+        # 지정가 주문인 경우 현재가와 비교 (선택적 검증)
+        if order_type_str == "LIMIT" and current_price:
+            if order_price > current_price:
+                logger.warning(
+                    f"LIMIT sell price ({order_price}) is higher than current price ({current_price}). "
+                    f"Order may not be executed immediately."
+                )
+
+        # OrderType 변환
+        if order_type_str == "MARKET":
+            order_type = OrderType.MARKET
+            recommended_price = current_price if current_price else 0
+        else:
+            order_type = OrderType.LIMIT
+            recommended_price = order_price
+
+        # 종목명 조회
+        position = self._redis_manager.get_position(daily_strategy_id, stock_code)
+        stock_name = position.get("stock_name", "") if position else ""
+
+        # SignalResult 생성
+        signal = SignalResult(
+            signal_type="SELL",
+            stock_code=stock_code,
+            current_price=current_price if current_price else 0,
+            target_price=None,
+            target_quantity=order_quantity,
+            stop_loss_price=None,
+            recommended_order_price=recommended_price,
+            recommended_order_type=order_type,
+            expected_slippage_pct=0.0,
+            urgency="HIGH",
+            reason="사용자 수동 매도"
+        )
+
+        # 매도 주문 처리
+        result = await self._order_api.process_sell_order(
+            user_strategy_id=user_strategy_id,
+            signal=signal,
+            order_quantity=order_quantity,
+            stock_name=stock_name
+        )
+
+        if result.get("success"):
+            logger.info(
+                f"Manual sell order processed: "
+                f"stock_code={stock_code}, "
+                f"quantity={order_quantity}, "
+                f"order_type={order_type_str}, "
+                f"price={order_price}"
+            )
+        else:
+            logger.error(f"Manual sell order failed: {result.get('error')}")
 
     async def check_connection(self) -> bool:
         """Kafka 연결 상태 확인"""

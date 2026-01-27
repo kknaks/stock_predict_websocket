@@ -165,6 +165,63 @@ class SignalGenerator:
 
         return None  # 아무 조건도 충족하지 않음
 
+    def generate_manual_sell_signal(
+        self,
+        stock_code: str,
+        price_data: Dict,
+        asking_price_data: Dict,
+        order_type: str,
+        order_price: float,
+        order_quantity: int
+    ) -> SignalResult:
+        """
+        수동 매도 시그널 생성 (Mock 모드용)
+
+        사용자가 지정한 조건으로 매도 시그널 생성
+        SlippageCalculator를 통해 최적 가격 계산
+
+        Args:
+            stock_code: 종목 코드
+            price_data: 체결가 데이터
+            asking_price_data: 호가 데이터
+            order_type: 주문 유형 (LIMIT/MARKET)
+            order_price: 주문 가격 (지정가인 경우)
+            order_quantity: 주문 수량
+
+        Returns:
+            SignalResult: 시그널 결과
+        """
+        current_price = self.slippage_calculator._parse_float(price_data.get('STCK_PRPR', 0))
+
+        # 슬리피지 계산
+        slippage_result = self.slippage_calculator.calculate_sell_slippage(
+            price_data, asking_price_data, order_quantity
+        )
+
+        # 주문 유형에 따른 가격/유형 결정
+        if order_type == "MARKET":
+            recommended_order_type = OrderType.MARKET
+            recommended_price = slippage_result.recommended_price
+        else:
+            # 지정가: 사용자가 지정한 가격과 슬리피지 계산 결과 중 유리한 가격 선택
+            # 매도의 경우 더 높은 가격이 유리
+            recommended_order_type = OrderType.LIMIT
+            recommended_price = max(order_price, slippage_result.recommended_price)
+
+        return SignalResult(
+            signal_type="SELL",
+            stock_code=stock_code,
+            current_price=current_price,
+            target_price=None,
+            target_quantity=order_quantity,
+            stop_loss_price=None,
+            recommended_order_price=recommended_price,
+            recommended_order_type=recommended_order_type,
+            expected_slippage_pct=slippage_result.expected_slippage_pct,
+            urgency="HIGH",
+            reason=f"사용자 수동 매도 - {order_type} {order_quantity}주"
+        )
+
 
 # 싱글톤 인스턴스
 _signal_generator_instance: Optional[SignalGenerator] = None

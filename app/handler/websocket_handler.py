@@ -182,7 +182,12 @@ class WebSocketHandler:
                         exc_info=True
                     )
 
-            # 3. 메모리 및 Redis 전략 데이터 정리
+            # 3. daily_strategy 데이터 삭제 (다음 날 새로 생성되도록)
+            for user_strategy_id in all_strategy_ids:
+                self._redis_manager.delete_daily_strategy(user_strategy_id)
+            logger.info(f"Deleted daily_strategy for {len(all_strategy_ids)} strategies")
+
+            # 4. 메모리 및 Redis 전략 데이터 정리
             self._strategy_table.clear_all_strategies()
 
             logger.info("CLOSING websocket message processed successfully")

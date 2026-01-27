@@ -1785,6 +1785,168 @@ class WebSocketRedisManager:
             return daily_strategy.get("user_strategy_id")
         return None
 
+    # ==========================================================================
+    # Manual Sell Target 관리
+    # ==========================================================================
+
+    MANUAL_SELL_TARGET_KEY_PREFIX = "manual_sell:target"
+    MANUAL_SELL_TARGETS_SET_KEY_PREFIX = "manual_sell:targets"
+
+    def _get_manual_sell_target_key(self, user_strategy_id: int, stock_code: str) -> str:
+        """수동 매도 타겟 Redis 키 생성"""
+        return f"{self.MANUAL_SELL_TARGET_KEY_PREFIX}:{user_strategy_id}:{stock_code}"
+
+    def _get_manual_sell_targets_set_key(self, user_strategy_id: int) -> str:
+        """수동 매도 타겟 목록 Set Redis 키 생성"""
+        return f"{self.MANUAL_SELL_TARGETS_SET_KEY_PREFIX}:{user_strategy_id}"
+
+    def save_manual_sell_target(
+        self,
+        user_strategy_id: int,
+        stock_code: str,
+        order_type: str,
+        order_price: float,
+        order_quantity: int,
+    ) -> bool:
+        """
+        수동 매도 타겟을 Redis에 저장 (mock 모드용)
+
+        Args:
+            user_strategy_id: 사용자 전략 ID
+            stock_code: 종목 코드
+            order_type: 주문 유형 (LIMIT/MARKET)
+            order_price: 주문 가격 (지정가인 경우)
+            order_quantity: 주문 수량
+
+        Returns:
+            성공 여부
+        """
+        if not self._redis_client:
+            logger.warning("Redis not connected, skipping save manual sell target")
+            return False
+
+        try:
+            target_data = {
+                "user_strategy_id": user_strategy_id,
+                "stock_code": stock_code,
+                "order_type": order_type,
+                "order_price": order_price,
+                "order_quantity": order_quantity,
+                "created_at": datetime.now().isoformat(),
+            }
+
+            # 타겟 저장
+            key = self._get_manual_sell_target_key(user_strategy_id, stock_code)
+            self._redis_client.setex(
+                key,
+                self.TTL,
+                json.dumps(target_data, ensure_ascii=False, default=str)
+            )
+
+            # 타겟 목록에 추가
+            set_key = self._get_manual_sell_targets_set_key(user_strategy_id)
+            self._redis_client.sadd(set_key, stock_code)
+            self._redis_client.expire(set_key, self.TTL)
+
+            logger.info(
+                f"Manual sell target saved: "
+                f"user_strategy_id={user_strategy_id}, "
+                f"stock_code={stock_code}, "
+                f"order_type={order_type}, "
+                f"order_price={order_price}, "
+                f"order_quantity={order_quantity}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to save manual sell target: {e}", exc_info=True)
+            return False
+
+    def get_manual_sell_target(self, user_strategy_id: int, stock_code: str) -> Optional[Dict[str, Any]]:
+        """
+        수동 매도 타겟 조회
+
+        Args:
+            user_strategy_id: 사용자 전략 ID
+            stock_code: 종목 코드
+
+        Returns:
+            타겟 데이터 또는 None
+        """
+        if not self._redis_client:
+            return None
+
+        try:
+            key = self._get_manual_sell_target_key(user_strategy_id, stock_code)
+            data = self._redis_client.get(key)
+            if data:
+                return json.loads(data)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get manual sell target: {e}", exc_info=True)
+            return None
+
+    def get_all_manual_sell_targets(self, user_strategy_id: int) -> Dict[str, Dict[str, Any]]:
+        """
+        특정 전략의 모든 수동 매도 타겟 조회
+
+        Args:
+            user_strategy_id: 사용자 전략 ID
+
+        Returns:
+            {stock_code: target_data} 딕셔너리
+        """
+        if not self._redis_client:
+            return {}
+
+        try:
+            set_key = self._get_manual_sell_targets_set_key(user_strategy_id)
+            stock_codes = self._redis_client.smembers(set_key)
+
+            targets = {}
+            for stock_code in stock_codes:
+                target_data = self.get_manual_sell_target(user_strategy_id, stock_code)
+                if target_data:
+                    targets[stock_code] = target_data
+
+            return targets
+        except Exception as e:
+            logger.error(f"Failed to get all manual sell targets: {e}", exc_info=True)
+            return {}
+
+    def delete_manual_sell_target(self, user_strategy_id: int, stock_code: str) -> bool:
+        """
+        수동 매도 타겟 삭제
+
+        Args:
+            user_strategy_id: 사용자 전략 ID
+            stock_code: 종목 코드
+
+        Returns:
+            성공 여부
+        """
+        if not self._redis_client:
+            return False
+
+        try:
+            # 타겟 삭제
+            key = self._get_manual_sell_target_key(user_strategy_id, stock_code)
+            self._redis_client.delete(key)
+
+            # 목록에서 제거
+            set_key = self._get_manual_sell_targets_set_key(user_strategy_id)
+            self._redis_client.srem(set_key, stock_code)
+
+            logger.info(
+                f"Manual sell target deleted: "
+                f"user_strategy_id={user_strategy_id}, "
+                f"stock_code={stock_code}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete manual sell target: {e}", exc_info=True)
+            return False
+
     def generate_daily_strategy_id(self) -> int:
         """
         새로운 daily_strategy_id 생성 (Redis INCR 사용)
@@ -1805,6 +1967,43 @@ class WebSocketRedisManager:
         except Exception as e:
             logger.error(f"Failed to generate daily_strategy_id: {e}", exc_info=True)
             return int(datetime.now().strftime("%Y%m%d%H%M%S"))
+
+    def delete_daily_strategy(self, user_strategy_id: int) -> bool:
+        """
+        Daily Strategy 삭제 (장 마감 시 호출)
+
+        Args:
+            user_strategy_id: 사용자 전략 ID
+
+        Returns:
+            성공 여부
+        """
+        if not self._redis_client:
+            return False
+
+        try:
+            # user_strategy_id → daily_strategy_id 매핑 조회
+            daily_strategy_id = self.get_daily_strategy_id(user_strategy_id)
+
+            # 인덱스 키 삭제
+            user_key = self._get_daily_strategy_by_user_key(user_strategy_id)
+            self._redis_client.delete(user_key)
+
+            # daily_strategy 데이터 삭제
+            if daily_strategy_id:
+                strategy_key = self._get_daily_strategy_key(daily_strategy_id)
+                self._redis_client.delete(strategy_key)
+
+            logger.info(
+                f"Deleted daily_strategy: "
+                f"user_strategy_id={user_strategy_id}, "
+                f"daily_strategy_id={daily_strategy_id}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to delete daily_strategy: {e}", exc_info=True)
+            return False
 
 
 # 싱글톤 인스턴스

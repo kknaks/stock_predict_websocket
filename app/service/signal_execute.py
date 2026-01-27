@@ -213,7 +213,15 @@ class SignalExecutor:
                 logger.debug(f"호가 데이터 없음: {stock_code}")
                 return
 
-            # 모든 전략에 대해 시그널 체크
+            # 수동 매도 타겟 체크 (Mock 모드용)
+            await self._check_manual_sell_targets(
+                stock_code=stock_code,
+                current_price=current_price,
+                price_data=price_data,
+                asking_price_data=asking_price_data
+            )
+
+            # 모든 전략에 대해 시그널 체크 (자동 매도)
             strategy_ids = self._strategy_table.get_all_strategies()
 
             for user_strategy_id in strategy_ids:
@@ -476,6 +484,114 @@ class SignalExecutor:
 
         except Exception as e:
             logger.error(f"시그널 Redis 저장 실패: {e}", exc_info=True)
+
+    async def _check_manual_sell_targets(
+        self,
+        stock_code: str,
+        current_price: float,
+        price_data: dict,
+        asking_price_data: dict
+    ) -> None:
+        """
+        수동 매도 타겟 체크 (Mock 모드용)
+
+        Redis에 등록된 수동 매도 타겟을 확인하고 가격 조건이 충족되면 주문 생성
+
+        Args:
+            stock_code: 종목 코드
+            current_price: 현재가
+            price_data: 가격 데이터
+            asking_price_data: 호가 데이터
+        """
+        try:
+            # 모든 전략에 대해 수동 매도 타겟 체크
+            strategy_ids = self._strategy_table.get_all_strategies()
+
+            for user_strategy_id in strategy_ids:
+                # 수동 매도 타겟 조회
+                target = self._redis_manager.get_manual_sell_target(user_strategy_id, stock_code)
+                if not target:
+                    continue
+
+                order_type = target.get("order_type", "LIMIT")
+                order_price = float(target.get("order_price", 0))
+                order_quantity = int(target.get("order_quantity", 0))
+
+                if order_quantity <= 0:
+                    logger.warning(f"Invalid manual sell quantity: {order_quantity}")
+                    self._redis_manager.delete_manual_sell_target(user_strategy_id, stock_code)
+                    continue
+
+                # 가격 조건 체크
+                should_execute = False
+
+                if order_type == "MARKET":
+                    # 시장가: 바로 실행
+                    should_execute = True
+                    logger.info(
+                        f"[MANUAL SELL] 시장가 조건 충족: "
+                        f"전략={user_strategy_id}, 종목={stock_code}, 현재가={current_price:,.0f}"
+                    )
+                else:
+                    # 지정가: 지정가 <= 현재가 일 때 실행 (매도)
+                    if order_price <= current_price:
+                        should_execute = True
+                        logger.info(
+                            f"[MANUAL SELL] 지정가 조건 충족: "
+                            f"전략={user_strategy_id}, 종목={stock_code}, "
+                            f"지정가={order_price:,.0f} <= 현재가={current_price:,.0f}"
+                        )
+                    else:
+                        logger.debug(
+                            f"[MANUAL SELL] 지정가 조건 미충족: "
+                            f"전략={user_strategy_id}, 종목={stock_code}, "
+                            f"지정가={order_price:,.0f} > 현재가={current_price:,.0f}"
+                        )
+
+                if should_execute:
+                    # SlippageCalculator를 통해 최적 가격 계산
+                    signal = self._signal_generator.generate_manual_sell_signal(
+                        stock_code=stock_code,
+                        price_data=price_data,
+                        asking_price_data=asking_price_data,
+                        order_type=order_type,
+                        order_price=order_price,
+                        order_quantity=order_quantity
+                    )
+
+                    if signal:
+                        logger.warning(
+                            f"🔵 수동 매도 시그널 생성! "
+                            f"[전략={user_strategy_id}] "
+                            f"종목={stock_code}, "
+                            f"수량={order_quantity}, "
+                            f"현재가={current_price:,.0f}, "
+                            f"추천가={signal.recommended_order_price:,.0f}"
+                        )
+
+                        # 주문 처리
+                        order_result = await self._order_api.process_sell_order(
+                            user_strategy_id=user_strategy_id,
+                            signal=signal,
+                            order_quantity=order_quantity
+                        )
+
+                        if order_result.get("success"):
+                            logger.info(
+                                f"✅ 수동 매도 주문 처리 완료: "
+                                f"[전략={user_strategy_id}] 종목={stock_code}"
+                            )
+                            # 타겟 삭제
+                            self._redis_manager.delete_manual_sell_target(user_strategy_id, stock_code)
+                        else:
+                            logger.error(
+                                f"❌ 수동 매도 주문 실패: "
+                                f"[전략={user_strategy_id}] 종목={stock_code}, "
+                                f"오류={order_result.get('error', 'N/A')}"
+                            )
+
+        except Exception as e:
+            logger.error(f"수동 매도 타겟 체크 오류: {e}", exc_info=True)
 
     def clear_generated_signal(self, user_strategy_id: int, stock_code: str, signal_type: str = None) -> None:
         """
