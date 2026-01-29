@@ -667,6 +667,45 @@ class WebSocketManager:
             self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "price"})
             return False
 
+    async def add_price_stocks(self, new_stocks: List[str]) -> bool:
+        """
+        가격 웹소켓 종목 추가 (기존 종목 유지 + 새 종목만 추가)
+
+        Args:
+            new_stocks: 추가할 종목 리스트
+
+        Returns:
+            성공 여부
+        """
+        if not self._price_client:
+            logger.warning("Price websocket is not running, cannot add stocks")
+            return False
+
+        if not self._price_client.is_connected:
+            logger.warning("Price websocket is not connected, cannot add stocks")
+            return False
+
+        try:
+            await self._price_client.add_stocks(new_stocks)
+            logger.info(f"Price websocket stocks added: {len(new_stocks)} new stocks requested")
+
+            # Redis에 업데이트된 종목 정보 저장
+            if self._price_client.stocks:
+                self._redis_manager.save_price_connection(
+                    ws_token=self._price_client.ws_token,
+                    appkey=self._price_client.appkey,
+                    env_dv=self._price_client.env_dv,
+                    stocks=self._price_client.stocks,
+                    status="connected",
+                    reconnect_attempts=self._price_client.reconnect_attempts,
+                )
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add price websocket stocks: {e}", exc_info=True)
+            self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "price"})
+            return False
+
     def get_status(self) -> Dict:
         """상태 정보 반환"""
         # 가격 웹소켓 상태

@@ -37,4 +37,5 @@ class PredictionMessage(BaseModel):
 
     timestamp: datetime
     total_count: int
+    exchange_type: str
     predictions: List[PredictionItem]

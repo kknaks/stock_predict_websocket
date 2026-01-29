@@ -139,6 +139,16 @@ class SignalExecutor:
                 if not strategy_info or strategy_info.strategy_id != 1:
                     continue
 
+                # paper 계좌는 KRX 장 운영시간(09:00~15:30)에만 주문 가능
+                if strategy_info.account_type == "paper":
+                    now_time = datetime.now().strftime("%H%M%S")
+                    if now_time < "090000" or now_time > "153000":
+                        logger.debug(
+                            f"paper 계좌 매수 스킵 (KRX 장 운영시간 외): "
+                            f"전략={user_strategy_id}, 종목={stock_code}"
+                        )
+                        continue
+
                 # 최적화 3: 이미 BUY 시그널 생성된 조합은 스킵
                 signal_key = f"{user_strategy_id}_{stock_code}_BUY"
                 if signal_key in self._generated_signals:
@@ -229,6 +239,17 @@ class SignalExecutor:
                 signal_key = f"{user_strategy_id}_{stock_code}_SELL"
                 if signal_key in self._generated_signals:
                     continue
+
+                # paper 계좌는 KRX 장 운영시간(09:00~15:30)에만 주문 가능
+                strategy_info = self._strategy_table.get_strategy_info(user_strategy_id)
+                if strategy_info and strategy_info.account_type == "paper":
+                    now_time = datetime.now().strftime("%H%M%S")
+                    if now_time < "090000" or now_time > "153000":
+                        logger.debug(
+                            f"paper 계좌 매도 스킵 (KRX 장 운영시간 외): "
+                            f"전략={user_strategy_id}, 종목={stock_code}"
+                        )
+                        continue
 
                 # Position 조회 (보유 수량 확인)
                 position = self._redis_manager.get_position_by_user(user_strategy_id, stock_code)

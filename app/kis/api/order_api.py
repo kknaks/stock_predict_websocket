@@ -433,7 +433,7 @@ class OrderAPI:
                 "ORD_DVSN": ord_dvsn,  # 주문구분
                 "ORD_QTY": ord_qty,  # 주문수량
                 "ORD_UNPR": ord_unpr,  # 주문단가
-                "EXCG_ID_DVSN_CD": "KRX",  # 거래소ID구분코드
+                "EXCG_ID_DVSN_CD": "SOR" if account_type == "real" else "KRX",  # real: SOR(통합), paper: KRX
                 "SLL_TYPE": "",  # 매도유형 (매수 시 빈값)
             }
 
@@ -898,7 +898,7 @@ class OrderAPI:
                 "ORD_DVSN": ord_dvsn,  # 주문구분
                 "ORD_QTY": ord_qty,  # 주문수량
                 "ORD_UNPR": ord_unpr,  # 주문단가
-                "EXCG_ID_DVSN_CD": "KRX",  # 거래소ID구분코드
+                "EXCG_ID_DVSN_CD": "SOR" if account_type == "real" else "KRX",  # real: SOR(통합), paper: KRX
                 "SLL_TYPE": "01",  # 매도유형 (01: 일반매도)
                 "CNDT_PRIC": ""  # 조건가격 (스탑지정가호가 주문 시 사용)
             }
@@ -1392,7 +1392,7 @@ class OrderAPI:
                 "ORD_QTY": ord_qty,  # 주문수량
                 "ORD_UNPR": ord_unpr,  # 주문단가 (시장가는 0)
                 "QTY_ALL_ORD_YN": "Y",  # 잔량전부주문여부 (Y: 전량)
-                "EXCG_ID_DVSN_CD": "KRX",  # 거래소ID구분코드
+                "EXCG_ID_DVSN_CD": "SOR" if account_type == "real" else "KRX",  # real: SOR(통합), paper: KRX
             }
 
             async with httpx.AsyncClient() as client:
