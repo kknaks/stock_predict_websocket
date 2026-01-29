@@ -65,7 +65,7 @@ class PredictionHandler:
             p for p in message.predictions
             if p.gap_rate < 28 and p.prob_up > 0.2
         ]
-        candidate_stocks = sorted(candidate_stocks, key=lambda x: x.prob_up, reverse=True)[:15]
+        candidate_stocks = sorted(candidate_stocks, key=lambda x: x.prob_up, reverse=True)[:10]
 
         logger.info(f"Candidate stocks: {candidate_stocks}")
         
