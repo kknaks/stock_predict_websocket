@@ -23,6 +23,7 @@ class PredictionHandler:
         self._prediction_history: List[PredictionMessage] = []
         self._max_history = 100  # 최대 보관 개수
         self._websocket_manager = get_websocket_manager()
+        self._nxt_had_candidates: bool = False  # nxt에서 후보가 있었는지 추적
 
     @property
     def latest_predictions(self) -> Optional[PredictionMessage]:
@@ -80,9 +81,15 @@ class PredictionHandler:
         # 웹소켓 종목 업데이트 (exchange_type 기반 분기)
         exchange_type = message.exchange_type.lower()
         if exchange_type == "nxt":
+            self._nxt_had_candidates = len(candidate_stocks) > 0
             await self._update_websocket_stocks(candidate_stocks)
         else:
-            await self._add_websocket_stocks(candidate_stocks)
+            # nxt에서 후보가 없었으면 삼성전자가 아직 구독 중이므로 교체(update)
+            # nxt에서 후보가 있었으면 기존 구독에 추가(add)
+            if self._nxt_had_candidates:
+                await self._add_websocket_stocks(candidate_stocks)
+            else:
+                await self._update_websocket_stocks(candidate_stocks)
 
     def _log_predictions(self, message: PredictionMessage) -> None:
         """예측 결과 요약 로깅"""
