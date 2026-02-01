@@ -125,19 +125,20 @@ class StrategyTable:
             TargetPrice: 계산된 목표가 정보
         """
         stock_open = float(prediction.stock_open)
-        take_profit_target = float(prediction.take_profit_target)
+        max_return_if_up = float(prediction.max_return_if_up)
+        return_if_down = float(prediction.return_if_down)
         ls_ratio = strategy_config.ls_ratio
         tp_ratio = strategy_config.tp_ratio
 
-        # 목표가 = 시가 * (1 + take_profit_target / 100)
-        target_price = stock_open * (1 + take_profit_target / 100)
-        # 목표 매도가 = 시가 * (1 + take_profit_target * tp_ratio / 100)
-        # tp_ratio만큼 수익 시 매도 (예: 0.8이면 80% 수익 시 매도)
-        target_sell_price = stock_open * (1 + take_profit_target * tp_ratio / 100)
+        # 목표가 = 시가 * (1 + max_return_if_up / 100)
+        target_price = stock_open * (1 + max_return_if_up / 100)
+        # 목표 매도가 = 시가 * (1 + max_return_if_up * tp_ratio / 100)
+        # tp_ratio만큼 수익 시 매도 (예: 0.8이면 최대상승의 80% 도달 시 매도)
+        target_sell_price = stock_open * (1 + max_return_if_up * tp_ratio / 100)
 
-        # 손절가 = 시가 * (1 + ls_ratio / 100)
-        # ls_ratio는 음수 (예: -1이면 -1% 손절)
-        stop_loss_price = stock_open * (1 + ls_ratio / 100)
+        # 손절가 = 시가 * (1 + return_if_down * ls_ratio / 100)
+        # return_if_down은 음수 (예: -2.5), ls_ratio는 양수 소수 (예: 0.8이면 예상하락의 80% 도달 시 손절)
+        stop_loss_price = stock_open * (1 + return_if_down * ls_ratio / 100)
 
         # 비중 기반 목표 구매 수량 계산
         # 수량 = (총 투자 금액 * 비중) / 시가
