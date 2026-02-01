@@ -161,7 +161,7 @@ class StrategyTable:
             target_sell_price=target_sell_price,
             stop_loss_price=stop_loss_price,
             gap_rate=prediction.gap_rate,
-            take_profit_target=take_profit_target,
+            take_profit_target=max_return_if_up,
             prob_up=float(prediction.prob_up),
             signal=prediction.signal,
             weight=weight,
