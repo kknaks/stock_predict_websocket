@@ -352,7 +352,18 @@ class PriceWebSocketClient:
                 pass
 
     async def _handle_message(self, message: str) -> None:
-        """메시지 처리"""
+        """메시지 처리 (KIS WebSocket은 하나의 프레임에 여러 메시지를 SOH(\x01)로 구분하여 전송)"""
+        # SOH 구분자로 여러 메시지가 묶여올 수 있으므로 분리하여 각각 처리
+        if "\x01" in message:
+            sub_messages = message.split("\x01")
+            for sub_msg in sub_messages:
+                if sub_msg.strip():
+                    await self._handle_single_message(sub_msg)
+            return
+        await self._handle_single_message(message)
+
+    async def _handle_single_message(self, message: str) -> None:
+        """단일 메시지 처리"""
         try:
             # JSON 형식 메시지 (구독 성공, PING 등)
             if message.strip().startswith("{"):
