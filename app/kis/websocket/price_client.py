@@ -457,6 +457,14 @@ class PriceWebSocketClient:
                             if len(record_fields) >= 3:
                                 parsed_data = self._parse_price_data(record_fields)
 
+                                # 현재가가 0이면 비정상 데이터 - RAW 로깅 후 스킵
+                                if parsed_data.get("STCK_PRPR") in ("0", "", None):
+                                    logger.warning(
+                                        f"현재가 0 감지 - 스킵: 종목={parsed_data.get('MKSC_SHRN_ISCD')}, "
+                                        f"필드수={len(record_fields)}, RAW={line}"
+                                    )
+                                    continue
+
                                 await self._save_price_to_redis(parsed_data)
 
                                 logger.debug(
