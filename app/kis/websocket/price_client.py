@@ -492,25 +492,40 @@ class PriceWebSocketClient:
                                 dtype=object,
                             )
                         except Exception as e:
-                            logger.warning(f"[H0UNCNT0] 파싱 실패: {e}")
+                            logger.info(f"[H0UNCNT0] 파싱 실패: {e}, RAW={message[:200]}")
                             return
 
-                        for _, row in df.iterrows():
+                        logger.info(
+                            f"[H0UNCNT0] 파싱 결과: {len(df)}건, "
+                            f"컬럼수={len(df.columns)}"
+                        )
+
+                        for idx, row in df.iterrows():
                             parsed_data = row.dropna().to_dict()
 
-                            # 현재가가 0이면 비정상 데이터 - 스킵
                             stock_code = parsed_data.get("MKSC_SHRN_ISCD", "")
                             current_price = parsed_data.get("STCK_PRPR", "")
+
+                            logger.info(
+                                f"[H0UNCNT0] 레코드 {idx}: "
+                                f"종목={stock_code}, 현재가={current_price}, "
+                                f"시가={parsed_data.get('STCK_OPRC', '')}, "
+                                f"매도1={parsed_data.get('ASKP1', '')}, "
+                                f"매수1={parsed_data.get('BIDP1', '')}, "
+                                f"필드수={len(parsed_data)}"
+                            )
+
+                            # 현재가가 0이면 비정상 데이터 - 스킵
                             if not current_price or current_price == "0":
-                                logger.debug(
+                                logger.info(
                                     f"[H0UNCNT0] 현재가 0 - 스킵: 종목={stock_code}"
                                 )
                                 continue
 
                             await self._save_price_to_redis(parsed_data)
 
-                            logger.debug(
-                                f"✓ 실시간 체결가: {stock_code} - "
+                            logger.info(
+                                f"[H0UNCNT0] Kafka 발행: {stock_code} - "
                                 f"{current_price}원 "
                                 f"({parsed_data.get('STCK_CNTG_HOUR')})"
                             )
