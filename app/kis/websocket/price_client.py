@@ -308,8 +308,8 @@ class PriceWebSocketClient:
 
                 try:
                     # 원본 메시지 로깅 (디버깅용 - 파이프 형식 데이터 확인)
-                    # if "|" in message:
-                    #     logger.info(f"[RAW DATA MESSAGE] {message[:200]}...")  # 처음 200자만
+                    if "|" in message:
+                        logger.info(f"[RAW DATA MESSAGE] {message[:300]}...")  # 처음 300자만
                     await self._handle_message(message)
                 except WebSocketMessageError as e:
                     # 메시지 에러는 로깅 후 계속 진행
@@ -442,30 +442,24 @@ class PriceWebSocketClient:
                         
                         # 모든 필드를 ^로 분리
                         all_fields = all_fields_str.split("^")
-                        
-                        # 각 레코드는 46개 필드로 구성됨
+
+                        # 각 레코드는 46개 필드 (KIS API H0UNCNT0 스펙)
                         FIELDS_PER_RECORD = 46
                         total_fields_needed = record_count * FIELDS_PER_RECORD
-                        
-                        # logger.info(
-                        #     f"✓ 체결가 데이터 수신: tr_id={tr_id}, 레코드수={record_count}, "
-                        #     f"총필드수={len(all_fields)}, 예상필드수={total_fields_needed}, 암호화={encrypt_flag}"
-                        # )
-                        
-                        if len(all_fields) < total_fields_needed:
+
+                        if len(all_fields) != total_fields_needed:
                             logger.warning(
-                                f"필드 개수 부족: 예상={total_fields_needed}, 실제={len(all_fields)}"
+                                f"필드 개수 불일치: 예상={total_fields_needed}, 실제={len(all_fields)}, "
+                                f"레코드수={record_count}"
                             )
-                        
-                        # 레코드별로 파싱 (각 레코드는 46개 필드)
+
+                        # 레코드별로 파싱 (불완전 레코드도 핵심 필드가 있으면 파싱)
                         for i in range(record_count):
                             start_idx = i * FIELDS_PER_RECORD
-                            end_idx = start_idx + FIELDS_PER_RECORD
-                            
-                            if end_idx <= len(all_fields):
-                                record_fields = all_fields[start_idx:end_idx]
-                                
-                                if len(record_fields) >= 3:
+                            end_idx = min(start_idx + FIELDS_PER_RECORD, len(all_fields))
+                            record_fields = all_fields[start_idx:end_idx]
+
+                            if len(record_fields) >= 3:
                                     # 필드 구조 파싱
                                     parsed_data = self._parse_price_data(record_fields)
                                     
@@ -487,11 +481,6 @@ class PriceWebSocketClient:
 
                                     # Kafka Producer로 전송
                                     await self._send_to_kafka(parsed_data)
-                            else:
-                                logger.warning(
-                                    f"레코드 {i+1}/{record_count} 필드 부족: "
-                                    f"필요={FIELDS_PER_RECORD}, 실제={len(all_fields) - start_idx}"
-                                )
                     
                     # 호가 데이터 처리 (H0UNASP0)
                     elif tr_id == "H0UNASP0" and all_fields_str:
@@ -504,8 +493,8 @@ class PriceWebSocketClient:
                         # 모든 필드를 ^로 분리
                         all_fields = all_fields_str.split("^")
                         
-                        # 각 레코드는 59개 필드로 구성됨 (GitHub 샘플 코드 기준)
-                        FIELDS_PER_RECORD = 59
+                        # 각 레코드는 65개 필드로 구성됨 (KIS 실시간호가 통합 H0UNASP0 기준)
+                        FIELDS_PER_RECORD = 65
                         total_fields_needed = record_count * FIELDS_PER_RECORD
                         
                         # logger.info(

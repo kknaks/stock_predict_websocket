@@ -198,7 +198,7 @@ class SignalExecutor:
             if not stock_code:
                 return
 
-            current_price = float(price_data.get('STCK_PRPR', 0))
+            current_price = float(price_data.get('STCK_PRPR') or 0)
             if current_price <= 0:
                 return
 
