@@ -55,7 +55,7 @@ class PriceWebSocketClient:
         "HOUR_CLS_CODE", "MRKT_TRTM_CLS_CODE", "VI_STND_PRC",
     ]
 
-    # H0UNASP0 호가 컬럼 (59개 - KIS 공식 스펙)
+    # H0UNASP0 호가 컬럼 (65개 - 실제 데이터 기준)
     ASKING_PRICE_COLUMNS = [
         "MKSC_SHRN_ISCD", "BSOP_HOUR", "HOUR_CLS_CODE",
         "ASKP1", "ASKP2", "ASKP3", "ASKP4", "ASKP5",
@@ -73,6 +73,8 @@ class PriceWebSocketClient:
         "ACML_VOL", "TOTAL_ASKP_RSQN_ICDC", "TOTAL_BIDP_RSQN_ICDC",
         "OVTM_TOTAL_ASKP_ICDC", "OVTM_TOTAL_BIDP_ICDC",
         "STCK_DEAL_CLS_CODE",
+        "KMID_PRC", "KMID_TOTAL_RSQN", "KMID_CLS_CODE",
+        "NMID_PRC", "NMID_TOTAL_RSQN", "NMID_CLS_CODE",
     ]
 
     def __init__(
@@ -541,11 +543,7 @@ class PriceWebSocketClient:
                     elif tr_id == "H0UNASP0" and all_fields_str:
                         # ^로 전체 split 후 59개씩 \n으로 묶어서 pd.read_csv로 파싱
                         fields = all_fields_str.split("^")
-                        n = len(self.ASKING_PRICE_COLUMNS)  # 59
-                        logger.info(
-                            f"[H0UNASP0] 총필드수={len(fields)}, "
-                            f"예상레코드={len(fields)//n}건(나머지={len(fields)%n})"
-                        )
+                        n = len(self.ASKING_PRICE_COLUMNS)  # 65
                         lines = []
                         for i in range(0, len(fields), n):
                             chunk = fields[i:i + n]
@@ -567,28 +565,27 @@ class PriceWebSocketClient:
                             logger.warning(f"[H0UNASP0] 파싱 실패: {e}")
                             return
 
-                        logger.info(f"[H0UNASP0] 파싱 결과: {len(df)}건")
+                        # logger.info(f"[H0UNASP0] 파싱 결과: {len(df)}건")
 
                         for _, row in df.iterrows():
                             parsed_data = row.dropna().to_dict()
 
-                            stock_code = parsed_data.get("MKSC_SHRN_ISCD", "")
-
-                            logger.info(
-                                f"[H0UNASP0] 레코드: 종목={stock_code}, "
-                                f"매도1={parsed_data.get('ASKP1', '')}, "
-                                f"매수1={parsed_data.get('BIDP1', '')}, "
-                                f"총매도잔량={parsed_data.get('TOTAL_ASKP_RSQN', '')}, "
-                                f"총매수잔량={parsed_data.get('TOTAL_BIDP_RSQN', '')}, "
-                                f"필드수={len(parsed_data)}"
-                            )
+                            # stock_code = parsed_data.get("MKSC_SHRN_ISCD", "")
+                            # logger.info(
+                            #     f"[H0UNASP0] 레코드: 종목={stock_code}, "
+                            #     f"매도1={parsed_data.get('ASKP1', '')}, "
+                            #     f"매수1={parsed_data.get('BIDP1', '')}, "
+                            #     f"총매도잔량={parsed_data.get('TOTAL_ASKP_RSQN', '')}, "
+                            #     f"총매수잔량={parsed_data.get('TOTAL_BIDP_RSQN', '')}, "
+                            #     f"필드수={len(parsed_data)}"
+                            # )
 
                             await self._save_asking_price_to_redis(parsed_data)
                             await self._send_asking_price_to_kafka(parsed_data)
 
-                            logger.info(
-                                f"[H0UNASP0] Kafka 발행: {stock_code}"
-                            )
+                            # logger.info(
+                            #     f"[H0UNASP0] Kafka 발행: {stock_code}"
+                            # )
                 
                 return
             
