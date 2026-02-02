@@ -8,7 +8,10 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from io import StringIO
 from typing import Dict, List, Optional
+
+import pandas as pd
 
 import websockets
 from websockets.client import WebSocketClientProtocol
@@ -34,6 +37,43 @@ logger = logging.getLogger(__name__)
 
 class PriceWebSocketClient:
     """가격 웹소켓 클라이언트"""
+
+    # H0UNCNT0 체결가 컬럼 (46개 - KIS 공식 스펙)
+    PRICE_COLUMNS = [
+        "MKSC_SHRN_ISCD", "STCK_CNTG_HOUR", "STCK_PRPR", "PRDY_VRSS_SIGN",
+        "PRDY_VRSS", "PRDY_CTRT", "WGHN_AVRG_STCK_PRC", "STCK_OPRC",
+        "STCK_HGPR", "STCK_LWPR", "ASKP1", "BIDP1", "CNTG_VOL", "ACML_VOL",
+        "ACML_TR_PBMN", "SELN_CNTG_CSNU", "SHNU_CNTG_CSNU", "NTBY_CNTG_CSNU",
+        "CTTR", "SELN_CNTG_SMTN", "SHNU_CNTG_SMTN", "CNTG_CLS_CODE",
+        "SHNU_RATE", "PRDY_VOL_VRSS_ACML_VOL_RATE", "OPRC_HOUR",
+        "OPRC_VRSS_PRPR_SIGN", "OPRC_VRSS_PRPR", "HGPR_HOUR",
+        "HGPR_VRSS_PRPR_SIGN", "HGPR_VRSS_PRPR", "LWPR_HOUR",
+        "LWPR_VRSS_PRPR_SIGN", "LWPR_VRSS_PRPR", "BSOP_DATE",
+        "NEW_MKOP_CLS_CODE", "TRHT_YN", "ASKP_RSQN1", "BIDP_RSQN1",
+        "TOTAL_ASKP_RSQN", "TOTAL_BIDP_RSQN", "VOL_TNRT",
+        "PRDY_SMNS_HOUR_ACML_VOL", "PRDY_SMNS_HOUR_ACML_VOL_RATE",
+        "HOUR_CLS_CODE", "MRKT_TRTM_CLS_CODE", "VI_STND_PRC",
+    ]
+
+    # H0UNASP0 호가 컬럼 (59개 - KIS 공식 스펙)
+    ASKING_PRICE_COLUMNS = [
+        "MKSC_SHRN_ISCD", "BSOP_HOUR", "HOUR_CLS_CODE",
+        "ASKP1", "ASKP2", "ASKP3", "ASKP4", "ASKP5",
+        "ASKP6", "ASKP7", "ASKP8", "ASKP9", "ASKP10",
+        "BIDP1", "BIDP2", "BIDP3", "BIDP4", "BIDP5",
+        "BIDP6", "BIDP7", "BIDP8", "BIDP9", "BIDP10",
+        "ASKP_RSQN1", "ASKP_RSQN2", "ASKP_RSQN3", "ASKP_RSQN4", "ASKP_RSQN5",
+        "ASKP_RSQN6", "ASKP_RSQN7", "ASKP_RSQN8", "ASKP_RSQN9", "ASKP_RSQN10",
+        "BIDP_RSQN1", "BIDP_RSQN2", "BIDP_RSQN3", "BIDP_RSQN4", "BIDP_RSQN5",
+        "BIDP_RSQN6", "BIDP_RSQN7", "BIDP_RSQN8", "BIDP_RSQN9", "BIDP_RSQN10",
+        "TOTAL_ASKP_RSQN", "TOTAL_BIDP_RSQN",
+        "OVTM_TOTAL_ASKP_RSQN", "OVTM_TOTAL_BIDP_RSQN",
+        "ANTC_CNPR", "ANTC_CNQN", "ANTC_VOL",
+        "ANTC_CNTG_VRSS", "ANTC_CNTG_VRSS_SIGN", "ANTC_CNTG_PRDY_CTRT",
+        "ACML_VOL", "TOTAL_ASKP_RSQN_ICDC", "TOTAL_BIDP_RSQN_ICDC",
+        "OVTM_TOTAL_ASKP_ICDC", "OVTM_TOTAL_BIDP_ICDC",
+        "STCK_DEAL_CLS_CODE",
+    ]
 
     def __init__(
         self,
@@ -438,57 +478,40 @@ class PriceWebSocketClient:
                 records = message.split("|")
                 
                 if len(records) >= 4:
-                    encrypt_flag = records[0]  # 암호화 유무
                     tr_id = records[1]  # TR_ID
-                    record_count_str = records[2]  # 레코드 개수 문자열
                     all_fields_str = records[3]  # 모든 필드가 ^로 구분된 문자열
                     
                     # 체결가 데이터 처리 (H0UNCNT0)
                     if tr_id == "H0UNCNT0" and all_fields_str:
                         try:
-                            record_count = int(record_count_str)
-                        except ValueError:
-                            logger.error(f"레코드 개수 파싱 실패: {record_count_str}")
+                            df = pd.read_csv(
+                                StringIO(all_fields_str),
+                                header=None,
+                                sep="^",
+                                names=self.PRICE_COLUMNS,
+                                dtype=object,
+                            )
+                        except Exception as e:
+                            logger.warning(f"[H0UNCNT0] 파싱 실패: {e}")
                             return
 
-                        all_fields = all_fields_str.split("^")
-                        FIELDS_PER_RECORD = 46
-                        total_fields_needed = record_count * FIELDS_PER_RECORD
-
-                        # 필드 수 불일치 시 RAW 데이터 로깅
-                        if len(all_fields) != total_fields_needed:
-                            logger.warning(
-                                f"[H0UNCNT0] 필드 수 불일치: 예상={total_fields_needed}, "
-                                f"실제={len(all_fields)}, 레코드수={record_count}, "
-                                f"RAW={message}"
-                            )
-
-                        for i in range(record_count):
-                            start_idx = i * FIELDS_PER_RECORD
-                            end_idx = min(start_idx + FIELDS_PER_RECORD, len(all_fields))
-                            record_fields = all_fields[start_idx:end_idx]
-
-                            if len(record_fields) < 3:
-                                continue
-
-                            parsed_data = self._parse_price_data(record_fields)
+                        for _, row in df.iterrows():
+                            parsed_data = row.dropna().to_dict()
 
                             # 현재가가 0이면 비정상 데이터 - 스킵
-                            if parsed_data.get("STCK_PRPR") in ("0", "", None):
-                                logger.warning(
-                                    f"[H0UNCNT0] 현재가 0 - 스킵: "
-                                    f"종목={parsed_data.get('MKSC_SHRN_ISCD')}, "
-                                    f"레코드={i+1}/{record_count}, "
-                                    f"RAW={'^'.join(record_fields)}"
+                            stock_code = parsed_data.get("MKSC_SHRN_ISCD", "")
+                            current_price = parsed_data.get("STCK_PRPR", "")
+                            if not current_price or current_price == "0":
+                                logger.debug(
+                                    f"[H0UNCNT0] 현재가 0 - 스킵: 종목={stock_code}"
                                 )
                                 continue
 
                             await self._save_price_to_redis(parsed_data)
 
                             logger.debug(
-                                f"✓ 실시간 체결가 데이터 저장 [{i+1}/{record_count}]: "
-                                f"{parsed_data.get('MKSC_SHRN_ISCD')} - "
-                                f"{parsed_data.get('STCK_PRPR')}원 "
+                                f"✓ 실시간 체결가: {stock_code} - "
+                                f"{current_price}원 "
                                 f"({parsed_data.get('STCK_CNTG_HOUR')})"
                             )
 
@@ -499,31 +522,26 @@ class PriceWebSocketClient:
                     # 호가 데이터 처리 (H0UNASP0)
                     elif tr_id == "H0UNASP0" and all_fields_str:
                         try:
-                            record_count = int(record_count_str)
-                        except ValueError:
-                            logger.error(f"레코드 개수 파싱 실패: {record_count_str}")
+                            df = pd.read_csv(
+                                StringIO(all_fields_str),
+                                header=None,
+                                sep="^",
+                                names=self.ASKING_PRICE_COLUMNS,
+                                dtype=object,
+                            )
+                        except Exception as e:
+                            logger.warning(f"[H0UNASP0] 파싱 실패: {e}")
                             return
 
-                        all_fields = all_fields_str.split("^")
-                        FIELDS_PER_RECORD = 59
-
-                        for i in range(record_count):
-                            start_idx = i * FIELDS_PER_RECORD
-                            end_idx = min(start_idx + FIELDS_PER_RECORD, len(all_fields))
-                            record_fields = all_fields[start_idx:end_idx]
-
-                            if len(record_fields) < 3:
-                                continue
-
-                            parsed_data = self._parse_asking_price_data(record_fields)
+                        for _, row in df.iterrows():
+                            parsed_data = row.dropna().to_dict()
 
                             await self._save_asking_price_to_redis(parsed_data)
 
                             logger.debug(
-                                f"✓ 실시간 호가 데이터 저장 [{i+1}/{record_count}]: "
-                                f"{parsed_data.get('MKSC_SHRN_ISCD')} - "
-                                f"매도1호가={parsed_data.get('ASKP1')}, "
-                                f"매수1호가={parsed_data.get('BIDP1')}"
+                                f"✓ 실시간 호가: {parsed_data.get('MKSC_SHRN_ISCD')} - "
+                                f"매도1={parsed_data.get('ASKP1')}, "
+                                f"매수1={parsed_data.get('BIDP1')}"
                             )
                             await self._send_asking_price_to_kafka(parsed_data)
                 
@@ -538,145 +556,6 @@ class PriceWebSocketClient:
         except Exception as e:
             logger.error(f"메시지 처리 오류: {e}", exc_info=True)
     
-    def _parse_price_data(self, fields: List[str]) -> dict:
-        """가격 데이터 필드 파싱"""
-        # MCP에서 확인한 컬럼 순서
-        columns = [
-            "MKSC_SHRN_ISCD",      # 0: 종목코드
-            "STCK_CNTG_HOUR",       # 1: 체결시간
-            "STCK_PRPR",            # 2: 현재가
-            "PRDY_VRSS_SIGN",       # 3: 전일대비부호
-            "PRDY_VRSS",            # 4: 전일대비
-            "PRDY_CTRT",            # 5: 등락률
-            "WGHN_AVRG_STCK_PRC",   # 6: 가중평균주가
-            "STCK_OPRC",            # 7: 시가
-            "STCK_HGPR",            # 8: 고가
-            "STCK_LWPR",            # 9: 저가
-            "ASKP1",                # 10: 매도호가1
-            "BIDP1",                # 11: 매수호가1
-            "CNTG_VOL",             # 12: 체결량
-            "ACML_VOL",             # 13: 누적거래량
-            "ACML_TR_PBMN",         # 14: 누적거래대금
-            "SELN_CNTG_CSNU",       # 15: 매도체결건수
-            "SHNU_CNTG_CSNU",       # 16: 매수체결건수
-            "NTBY_CNTG_CSNU",       # 17: 순매수체결건수
-            "CTTR",                 # 18: 체결강도
-            "SELN_CNTG_SMTN",       # 19: 총매도체결수량
-            "SHNU_CNTG_SMTN",       # 20: 총매수체결수량
-            "CNTG_CLS_CODE",        # 21: 체결구분
-            "SHNU_RATE",            # 22: 매수비율
-            "PRDY_VOL_VRSS_ACML_VOL_RATE",  # 23: 전일거래량대비누적거래량비율
-            "OPRC_HOUR",            # 24: 시가시간
-            "OPRC_VRSS_PRPR_SIGN",  # 25: 시가대비현재가부호
-            "OPRC_VRSS_PRPR",       # 26: 시가대비현재가
-            "HGPR_HOUR",            # 27: 고가시간
-            "HGPR_VRSS_PRPR_SIGN",  # 28: 고가대비현재가부호
-            "HGPR_VRSS_PRPR",       # 29: 고가대비현재가
-            "LWPR_HOUR",            # 30: 저가시간
-            "LWPR_VRSS_PRPR_SIGN",  # 31: 저가대비현재가부호
-            "LWPR_VRSS_PRPR",       # 32: 저가대비현재가
-            "BSOP_DATE",            # 33: 영업일자
-            "NEW_MKOP_CLS_CODE",    # 34: 신장전일구분코드
-            "TRHT_YN",              # 35: 거래정지여부
-            "ASKP_RSQN1",           # 36: 매도호가잔량1
-            "BIDP_RSQN1",           # 37: 매수호가잔량1
-            "TOTAL_ASKP_RSQN",      # 38: 총매도호가잔량
-            "TOTAL_BIDP_RSQN",      # 39: 총매수호가잔량
-            "VOL_TNRT",             # 40: 거래량회전율
-            "PRDY_SMNS_HOUR_ACML_VOL",      # 41: 전일동시간누적거래량
-            "PRDY_SMNS_HOUR_ACML_VOL_RATE", # 42: 전일동시간누적거래량비율
-            "HOUR_CLS_CODE",        # 43: 시간구분코드
-            "MRKT_TRTM_CLS_CODE",   # 44: 장구분코드
-            "VI_STND_PRC",          # 45: VI적용기준가
-        ]
-        
-        parsed = {}
-        for i, field in enumerate(fields):
-            if i < len(columns):
-                column_name = columns[i]
-                parsed[column_name] = field.strip()
-        
-        return parsed
-    
-    def _parse_asking_price_data(self, fields: List[str]) -> dict:
-        """호가 데이터 필드 파싱 (H0UNASP0)"""
-        # GitHub 샘플 코드에서 확인한 컬럼 순서
-        # https://github.com/koreainvestment/open-trading-api/blob/main/examples_llm/domestic_stock/asking_price_krx/asking_price_krx.py
-        columns = [
-            "MKSC_SHRN_ISCD",      # 0: 종목코드
-            "BSOP_HOUR",           # 1: 영업시간
-            "HOUR_CLS_CODE",       # 2: 시간구분코드
-            "ASKP1",               # 3: 매도호가1
-            "ASKP2",               # 4: 매도호가2
-            "ASKP3",               # 5: 매도호가3
-            "ASKP4",               # 6: 매도호가4
-            "ASKP5",               # 7: 매도호가5
-            "ASKP6",               # 8: 매도호가6
-            "ASKP7",               # 9: 매도호가7
-            "ASKP8",               # 10: 매도호가8
-            "ASKP9",               # 11: 매도호가9
-            "ASKP10",              # 12: 매도호가10
-            "BIDP1",               # 13: 매수호가1
-            "BIDP2",               # 14: 매수호가2
-            "BIDP3",               # 15: 매수호가3
-            "BIDP4",               # 16: 매수호가4
-            "BIDP5",               # 17: 매수호가5
-            "BIDP6",               # 18: 매수호가6
-            "BIDP7",               # 19: 매수호가7
-            "BIDP8",               # 20: 매수호가8
-            "BIDP9",               # 21: 매수호가9
-            "BIDP10",              # 22: 매수호가10
-            "ASKP_RSQN1",          # 23: 매도호가잔량1
-            "ASKP_RSQN2",          # 24: 매도호가잔량2
-            "ASKP_RSQN3",          # 25: 매도호가잔량3
-            "ASKP_RSQN4",          # 26: 매도호가잔량4
-            "ASKP_RSQN5",          # 27: 매도호가잔량5
-            "ASKP_RSQN6",          # 28: 매도호가잔량6
-            "ASKP_RSQN7",          # 29: 매도호가잔량7
-            "ASKP_RSQN8",          # 30: 매도호가잔량8
-            "ASKP_RSQN9",          # 31: 매도호가잔량9
-            "ASKP_RSQN10",         # 32: 매도호가잔량10
-            "BIDP_RSQN1",          # 33: 매수호가잔량1
-            "BIDP_RSQN2",          # 34: 매수호가잔량2
-            "BIDP_RSQN3",          # 35: 매수호가잔량3
-            "BIDP_RSQN4",          # 36: 매수호가잔량4
-            "BIDP_RSQN5",          # 37: 매수호가잔량5
-            "BIDP_RSQN6",          # 38: 매수호가잔량6
-            "BIDP_RSQN7",          # 39: 매수호가잔량7
-            "BIDP_RSQN8",          # 40: 매수호가잔량8
-            "BIDP_RSQN9",          # 41: 매수호가잔량9
-            "BIDP_RSQN10",         # 42: 매수호가잔량10
-            "TOTAL_ASKP_RSQN",     # 43: 총매도호가잔량
-            "TOTAL_BIDP_RSQN",     # 44: 총매수호가잔량
-            "OVTM_TOTAL_ASKP_RSQN", # 45: 시간외총매도호가잔량
-            "OVTM_TOTAL_BIDP_RSQN", # 46: 시간외총매수호가잔량
-            "ANTC_CNPR",           # 47: 예상체결가
-            "ANTC_CNQN",           # 48: 예상체결량
-            "ANTC_VOL",            # 49: 예상체결대금
-            "ANTC_CNTG_VRSS",      # 50: 예상체결전일대비
-            "ANTC_CNTG_VRSS_SIGN", # 51: 예상체결전일대비부호
-            "ANTC_CNTG_PRDY_CTRT", # 52: 예상체결전일대비율
-            "ACML_VOL",            # 53: 누적거래량
-            "TOTAL_ASKP_RSQN_ICDC", # 54: 총매도호가잔량증감
-            "TOTAL_BIDP_RSQN_ICDC", # 55: 총매수호가잔량증감
-            "OVTM_TOTAL_ASKP_ICDC", # 56: 시간외총매도호가잔량증감
-            "OVTM_TOTAL_BIDP_ICDC", # 57: 시간외총매수호가잔량증감
-            "STCK_DEAL_CLS_CODE",  # 58: 주식거래구분코드
-            "KMID_PRC",            # 59: KRX 중간가
-            "KMID_TOTAL_RSQN",     # 60: KRX 중간가잔량합계수량
-            "KMID_CLS_CODE",       # 61: KRX 중간가 매수매도구분
-            "NMID_PRC",            # 62: NXT 중간가
-            "NMID_TOTAL_RSQN",     # 63: NXT 중간가잔량합계수량
-            "NMID_CLS_CODE",       # 64: NXT 중간가 매수매도구분
-        ]
-        
-        parsed = {}
-        for i, field in enumerate(fields):
-            if i < len(columns):
-                column_name = columns[i]
-                parsed[column_name] = field.strip()
-        
-        return parsed
     
     async def _save_price_to_redis(self, price_data: dict) -> None:
         """실시간 가격 데이터를 Redis에 저장 (마지막 데이터만 유지)
