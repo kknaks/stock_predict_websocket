@@ -483,62 +483,77 @@ class PriceWebSocketClient:
                     
                     # 체결가 데이터 처리 (H0UNCNT0)
                     if tr_id == "H0UNCNT0" and all_fields_str:
+                        # ^로 전체 split 후 46개씩 \n으로 묶어서 pd.read_csv로 파싱
+                        fields = all_fields_str.split("^")
+                        n = len(self.PRICE_COLUMNS)  # 46
+                        lines = []
+                        for i in range(0, len(fields), n):
+                            chunk = fields[i:i + n]
+                            if len(chunk) == n:
+                                lines.append("^".join(chunk))
+
+                        if not lines:
+                            return
+
                         try:
                             df = pd.read_csv(
-                                StringIO(all_fields_str),
+                                StringIO("\n".join(lines)),
                                 header=None,
                                 sep="^",
                                 names=self.PRICE_COLUMNS,
                                 dtype=object,
                             )
                         except Exception as e:
-                            logger.info(f"[H0UNCNT0] 파싱 실패: {e}, RAW={message[:200]}")
+                            logger.info(f"[H0UNCNT0] 파싱 실패: {e}")
                             return
 
-                        logger.info(
-                            f"[H0UNCNT0] 파싱 결과: {len(df)}건, "
-                            f"컬럼수={len(df.columns)}"
-                        )
+                        logger.info(f"[H0UNCNT0] 파싱 결과: {len(df)}건")
 
-                        for idx, row in df.iterrows():
+                        for _, row in df.iterrows():
                             parsed_data = row.dropna().to_dict()
 
                             stock_code = parsed_data.get("MKSC_SHRN_ISCD", "")
                             current_price = parsed_data.get("STCK_PRPR", "")
 
                             logger.info(
-                                f"[H0UNCNT0] 레코드 {idx}: "
-                                f"종목={stock_code}, 현재가={current_price}, "
+                                f"[H0UNCNT0] 레코드: 종목={stock_code}, "
+                                f"현재가={current_price}, "
                                 f"시가={parsed_data.get('STCK_OPRC', '')}, "
                                 f"매도1={parsed_data.get('ASKP1', '')}, "
-                                f"매수1={parsed_data.get('BIDP1', '')}, "
-                                f"필드수={len(parsed_data)}"
+                                f"매수1={parsed_data.get('BIDP1', '')}"
                             )
 
                             # 현재가가 0이면 비정상 데이터 - 스킵
                             if not current_price or current_price == "0":
-                                logger.info(
-                                    f"[H0UNCNT0] 현재가 0 - 스킵: 종목={stock_code}"
-                                )
                                 continue
 
                             await self._save_price_to_redis(parsed_data)
-
-                            logger.info(
-                                f"[H0UNCNT0] Kafka 발행: {stock_code} - "
-                                f"{current_price}원 "
-                                f"({parsed_data.get('STCK_CNTG_HOUR')})"
-                            )
-
                             await self._signal_executor.check_and_generate_buy_signal(parsed_data)
                             await self._signal_executor.check_and_generate_sell_signal(parsed_data)
                             await self._send_to_kafka(parsed_data)
+
+                            logger.info(
+                                f"[H0UNCNT0] Kafka 발행: {stock_code} - "
+                                f"{current_price}원"
+                            )
                     
                     # 호가 데이터 처리 (H0UNASP0)
                     elif tr_id == "H0UNASP0" and all_fields_str:
+                        # ^로 전체 split 후 59개씩 \n으로 묶어서 pd.read_csv로 파싱
+                        fields = all_fields_str.split("^")
+                        n = len(self.ASKING_PRICE_COLUMNS)  # 59
+                        lines = []
+                        for i in range(0, len(fields), n):
+                            chunk = fields[i:i + n]
+                            if len(chunk) == n:
+                                lines.append("^".join(chunk))
+
+                        if not lines:
+                            return
+
                         try:
                             df = pd.read_csv(
-                                StringIO(all_fields_str),
+                                StringIO("\n".join(lines)),
                                 header=None,
                                 sep="^",
                                 names=self.ASKING_PRICE_COLUMNS,
