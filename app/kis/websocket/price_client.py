@@ -308,8 +308,8 @@ class PriceWebSocketClient:
 
                 try:
                     # 원본 메시지 로깅 (디버깅용 - 파이프 형식 데이터 확인)
-                    if "|" in message:
-                        logger.info(f"[RAW DATA MESSAGE] len={len(message)} | {message}")  # 전체 출력
+                    # if "|" in message:
+                    #     logger.info(f"[RAW DATA MESSAGE] len={len(message)} | {message}")
                     await self._handle_message(message)
                 except WebSocketMessageError as e:
                     # 메시지 에러는 로깅 후 계속 진행
@@ -450,7 +450,7 @@ class PriceWebSocketClient:
                         if len(all_fields) != total_fields_needed:
                             logger.warning(
                                 f"필드 개수 불일치: 예상={total_fields_needed}, 실제={len(all_fields)}, "
-                                f"레코드수={record_count}"
+                                f"레코드수={record_count}, RAW={message}"
                             )
 
                         # 레코드별로 파싱 (불완전 레코드도 핵심 필드가 있으면 파싱)
