@@ -398,7 +398,7 @@ class PriceWebSocketClient:
         """메시지 처리 (KIS WebSocket은 하나의 프레임에 여러 메시지를 SOH(\x01)로 구분하여 전송)"""
         # PINGPONG은 SOH 분리 전에 먼저 체크
         if "PINGPONG" in message:
-            logger.info("✓ PING 메시지 수신 - price websocket")
+            logger.info(f"✓ PING 메시지 수신 - price websocket [raw: {message[:200]}]")
             await self._handle_ping(message)
             return
 
