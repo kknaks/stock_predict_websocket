@@ -507,7 +507,7 @@ class PriceWebSocketClient:
                             logger.info(f"[H0UNCNT0] 파싱 실패: {e}")
                             return
 
-                        logger.info(f"[H0UNCNT0] 파싱 결과: {len(df)}건")
+                        # logger.info(f"[H0UNCNT0] 파싱 결과: {len(df)}건")
 
                         for _, row in df.iterrows():
                             parsed_data = row.dropna().to_dict()
@@ -515,13 +515,13 @@ class PriceWebSocketClient:
                             stock_code = parsed_data.get("MKSC_SHRN_ISCD", "")
                             current_price = parsed_data.get("STCK_PRPR", "")
 
-                            logger.info(
-                                f"[H0UNCNT0] 레코드: 종목={stock_code}, "
-                                f"현재가={current_price}, "
-                                f"시가={parsed_data.get('STCK_OPRC', '')}, "
-                                f"매도1={parsed_data.get('ASKP1', '')}, "
-                                f"매수1={parsed_data.get('BIDP1', '')}"
-                            )
+                            # logger.info(
+                            #     f"[H0UNCNT0] 레코드: 종목={stock_code}, "
+                            #     f"현재가={current_price}, "
+                            #     f"시가={parsed_data.get('STCK_OPRC', '')}, "
+                            #     f"매도1={parsed_data.get('ASKP1', '')}, "
+                            #     f"매수1={parsed_data.get('BIDP1', '')}"
+                            # )
 
                             # 현재가가 0이면 비정상 데이터 - 스킵
                             if not current_price or current_price == "0":
@@ -532,10 +532,10 @@ class PriceWebSocketClient:
                             await self._signal_executor.check_and_generate_sell_signal(parsed_data)
                             await self._send_to_kafka(parsed_data)
 
-                            logger.info(
-                                f"[H0UNCNT0] Kafka 발행: {stock_code} - "
-                                f"{current_price}원"
-                            )
+                            # logger.info(
+                            #     f"[H0UNCNT0] Kafka 발행: {stock_code} - "
+                            #     f"{current_price}원"
+                            # )
                     
                     # 호가 데이터 처리 (H0UNASP0)
                     elif tr_id == "H0UNASP0" and all_fields_str:
@@ -563,17 +563,28 @@ class PriceWebSocketClient:
                             logger.warning(f"[H0UNASP0] 파싱 실패: {e}")
                             return
 
+                        logger.info(f"[H0UNASP0] 파싱 결과: {len(df)}건")
+
                         for _, row in df.iterrows():
                             parsed_data = row.dropna().to_dict()
 
-                            await self._save_asking_price_to_redis(parsed_data)
+                            stock_code = parsed_data.get("MKSC_SHRN_ISCD", "")
 
-                            logger.debug(
-                                f"✓ 실시간 호가: {parsed_data.get('MKSC_SHRN_ISCD')} - "
-                                f"매도1={parsed_data.get('ASKP1')}, "
-                                f"매수1={parsed_data.get('BIDP1')}"
+                            logger.info(
+                                f"[H0UNASP0] 레코드: 종목={stock_code}, "
+                                f"매도1={parsed_data.get('ASKP1', '')}, "
+                                f"매수1={parsed_data.get('BIDP1', '')}, "
+                                f"총매도잔량={parsed_data.get('TOTAL_ASKP_RSQN', '')}, "
+                                f"총매수잔량={parsed_data.get('TOTAL_BIDP_RSQN', '')}, "
+                                f"필드수={len(parsed_data)}"
                             )
+
+                            await self._save_asking_price_to_redis(parsed_data)
                             await self._send_asking_price_to_kafka(parsed_data)
+
+                            logger.info(
+                                f"[H0UNASP0] Kafka 발행: {stock_code}"
+                            )
                 
                 return
             
