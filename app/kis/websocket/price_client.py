@@ -445,107 +445,53 @@ class PriceWebSocketClient:
                     
                     # 체결가 데이터 처리 (H0UNCNT0)
                     if tr_id == "H0UNCNT0" and all_fields_str:
-                        try:
-                            record_count = int(record_count_str)
-                        except ValueError:
-                            logger.error(f"레코드 개수 파싱 실패: {record_count_str}")
-                            return
-                        
-                        # 모든 필드를 ^로 분리
-                        all_fields = all_fields_str.split("^")
+                        # 개행문자(\n)로 레코드 분리 후 각 레코드를 ^로 필드 분리
+                        # (KIS WebSocket은 레코드 간 구분자로 \n 사용)
+                        record_lines = [
+                            line for line in all_fields_str.split("\n") if line.strip()
+                        ]
 
-                        # 각 레코드는 46개 필드 (KIS API H0UNCNT0 스펙)
-                        FIELDS_PER_RECORD = 46
-                        total_fields_needed = record_count * FIELDS_PER_RECORD
-
-                        if len(all_fields) != total_fields_needed:
-                            logger.warning(
-                                f"필드 개수 불일치: 예상={total_fields_needed}, 실제={len(all_fields)}, "
-                                f"레코드수={record_count}, RAW={message}"
-                            )
-
-                        # 레코드별로 파싱 (불완전 레코드도 핵심 필드가 있으면 파싱)
-                        for i in range(record_count):
-                            start_idx = i * FIELDS_PER_RECORD
-                            end_idx = min(start_idx + FIELDS_PER_RECORD, len(all_fields))
-                            record_fields = all_fields[start_idx:end_idx]
+                        for i, line in enumerate(record_lines):
+                            record_fields = line.split("^")
 
                             if len(record_fields) >= 3:
-                                    # 필드 구조 파싱
-                                    parsed_data = self._parse_price_data(record_fields)
-                                    
-                                    # Redis에 저장
-                                    await self._save_price_to_redis(parsed_data)
-                                    
-                                    logger.debug(
-                                        f"✓ 실시간 체결가 데이터 저장 [{i+1}/{record_count}]: "
-                                        f"{parsed_data.get('MKSC_SHRN_ISCD')} - "
-                                        f"{parsed_data.get('STCK_PRPR')}원 "
-                                        f"({parsed_data.get('STCK_CNTG_HOUR')})"
-                                    )
+                                parsed_data = self._parse_price_data(record_fields)
 
-                                    # 매수 시그널 생성 (시가 매수 - strategy_id=1만)
-                                    await self._signal_executor.check_and_generate_buy_signal(parsed_data)
+                                await self._save_price_to_redis(parsed_data)
 
-                                    # 매도 시그널 생성 (목표가/손절가 도달 시)
-                                    await self._signal_executor.check_and_generate_sell_signal(parsed_data)
+                                logger.debug(
+                                    f"✓ 실시간 체결가 데이터 저장 [{i+1}/{len(record_lines)}]: "
+                                    f"{parsed_data.get('MKSC_SHRN_ISCD')} - "
+                                    f"{parsed_data.get('STCK_PRPR')}원 "
+                                    f"({parsed_data.get('STCK_CNTG_HOUR')})"
+                                )
 
-                                    # Kafka Producer로 전송
-                                    await self._send_to_kafka(parsed_data)
+                                await self._signal_executor.check_and_generate_buy_signal(parsed_data)
+                                await self._signal_executor.check_and_generate_sell_signal(parsed_data)
+                                await self._send_to_kafka(parsed_data)
                     
                     # 호가 데이터 처리 (H0UNASP0)
                     elif tr_id == "H0UNASP0" and all_fields_str:
-                        try:
-                            record_count = int(record_count_str)
-                        except ValueError:
-                            logger.error(f"레코드 개수 파싱 실패: {record_count_str}")
-                            return
-                        
-                        # 모든 필드를 ^로 분리
-                        all_fields = all_fields_str.split("^")
-                        
-                        # 각 레코드는 65개 필드로 구성됨 (KIS 실시간호가 통합 H0UNASP0 기준)
-                        FIELDS_PER_RECORD = 65
-                        total_fields_needed = record_count * FIELDS_PER_RECORD
-                        
-                        # logger.info(
-                        #     f"✓ 호가 데이터 수신: tr_id={tr_id}, 레코드수={record_count}, "
-                        #     f"총필드수={len(all_fields)}, 예상필드수={total_fields_needed}, 암호화={encrypt_flag}"
-                        # )
-                        
-                        if len(all_fields) < total_fields_needed:
-                            logger.warning(
-                                f"필드 개수 부족: 예상={total_fields_needed}, 실제={len(all_fields)}"
-                            )
-                        
-                        # 레코드별로 파싱 (각 레코드는 47개 필드)
-                        for i in range(record_count):
-                            start_idx = i * FIELDS_PER_RECORD
-                            end_idx = start_idx + FIELDS_PER_RECORD
-                            
-                            if end_idx <= len(all_fields):
-                                record_fields = all_fields[start_idx:end_idx]
-                                
-                                if len(record_fields) >= 3:
-                                    # 필드 구조 파싱
-                                    parsed_data = self._parse_asking_price_data(record_fields)
-                                    
-                                    # Redis에 저장
-                                    await self._save_asking_price_to_redis(parsed_data)
-                                    
-                                    logger.debug(
-                                        f"✓ 실시간 호가 데이터 저장 [{i+1}/{record_count}]: "
-                                        f"{parsed_data.get('MKSC_SHRN_ISCD')} - "
-                                        f"매도1호가={parsed_data.get('ASKP1')}, "
-                                        f"매수1호가={parsed_data.get('BIDP1')}"
-                                    )
-                                    # Kafka Producer로 전송
-                                    await self._send_asking_price_to_kafka(parsed_data)
-                            else:
-                                logger.warning(
-                                    f"레코드 {i+1}/{record_count} 필드 부족: "
-                                    f"필요={FIELDS_PER_RECORD}, 실제={len(all_fields) - start_idx}"
+                        # 개행문자(\n)로 레코드 분리 후 각 레코드를 ^로 필드 분리
+                        record_lines = [
+                            line for line in all_fields_str.split("\n") if line.strip()
+                        ]
+
+                        for i, line in enumerate(record_lines):
+                            record_fields = line.split("^")
+
+                            if len(record_fields) >= 3:
+                                parsed_data = self._parse_asking_price_data(record_fields)
+
+                                await self._save_asking_price_to_redis(parsed_data)
+
+                                logger.debug(
+                                    f"✓ 실시간 호가 데이터 저장 [{i+1}/{len(record_lines)}]: "
+                                    f"{parsed_data.get('MKSC_SHRN_ISCD')} - "
+                                    f"매도1호가={parsed_data.get('ASKP1')}, "
+                                    f"매수1호가={parsed_data.get('BIDP1')}"
                                 )
+                                await self._send_asking_price_to_kafka(parsed_data)
                 
                 return
             
