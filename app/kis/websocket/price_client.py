@@ -445,61 +445,87 @@ class PriceWebSocketClient:
                     
                     # 체결가 데이터 처리 (H0UNCNT0)
                     if tr_id == "H0UNCNT0" and all_fields_str:
-                        # 개행문자(\n)로 레코드 분리 후 각 레코드를 ^로 필드 분리
-                        # (KIS WebSocket은 레코드 간 구분자로 \n 사용)
-                        record_lines = [
-                            line for line in all_fields_str.split("\n") if line.strip()
-                        ]
+                        try:
+                            record_count = int(record_count_str)
+                        except ValueError:
+                            logger.error(f"레코드 개수 파싱 실패: {record_count_str}")
+                            return
 
-                        for i, line in enumerate(record_lines):
-                            record_fields = line.split("^")
+                        all_fields = all_fields_str.split("^")
+                        FIELDS_PER_RECORD = 46
+                        total_fields_needed = record_count * FIELDS_PER_RECORD
 
-                            if len(record_fields) >= 3:
-                                parsed_data = self._parse_price_data(record_fields)
+                        # 필드 수 불일치 시 RAW 데이터 로깅
+                        if len(all_fields) != total_fields_needed:
+                            logger.warning(
+                                f"[H0UNCNT0] 필드 수 불일치: 예상={total_fields_needed}, "
+                                f"실제={len(all_fields)}, 레코드수={record_count}, "
+                                f"RAW={message}"
+                            )
 
-                                # 현재가가 0이면 비정상 데이터 - RAW 로깅 후 스킵
-                                if parsed_data.get("STCK_PRPR") in ("0", "", None):
-                                    logger.warning(
-                                        f"현재가 0 감지 - 스킵: 종목={parsed_data.get('MKSC_SHRN_ISCD')}, "
-                                        f"필드수={len(record_fields)}, RAW={line}"
-                                    )
-                                    continue
+                        for i in range(record_count):
+                            start_idx = i * FIELDS_PER_RECORD
+                            end_idx = min(start_idx + FIELDS_PER_RECORD, len(all_fields))
+                            record_fields = all_fields[start_idx:end_idx]
 
-                                await self._save_price_to_redis(parsed_data)
+                            if len(record_fields) < 3:
+                                continue
 
-                                logger.debug(
-                                    f"✓ 실시간 체결가 데이터 저장 [{i+1}/{len(record_lines)}]: "
-                                    f"{parsed_data.get('MKSC_SHRN_ISCD')} - "
-                                    f"{parsed_data.get('STCK_PRPR')}원 "
-                                    f"({parsed_data.get('STCK_CNTG_HOUR')})"
+                            parsed_data = self._parse_price_data(record_fields)
+
+                            # 현재가가 0이면 비정상 데이터 - 스킵
+                            if parsed_data.get("STCK_PRPR") in ("0", "", None):
+                                logger.warning(
+                                    f"[H0UNCNT0] 현재가 0 - 스킵: "
+                                    f"종목={parsed_data.get('MKSC_SHRN_ISCD')}, "
+                                    f"레코드={i+1}/{record_count}, "
+                                    f"RAW={'^'.join(record_fields)}"
                                 )
+                                continue
 
-                                await self._signal_executor.check_and_generate_buy_signal(parsed_data)
-                                await self._signal_executor.check_and_generate_sell_signal(parsed_data)
-                                await self._send_to_kafka(parsed_data)
+                            await self._save_price_to_redis(parsed_data)
+
+                            logger.debug(
+                                f"✓ 실시간 체결가 데이터 저장 [{i+1}/{record_count}]: "
+                                f"{parsed_data.get('MKSC_SHRN_ISCD')} - "
+                                f"{parsed_data.get('STCK_PRPR')}원 "
+                                f"({parsed_data.get('STCK_CNTG_HOUR')})"
+                            )
+
+                            await self._signal_executor.check_and_generate_buy_signal(parsed_data)
+                            await self._signal_executor.check_and_generate_sell_signal(parsed_data)
+                            await self._send_to_kafka(parsed_data)
                     
                     # 호가 데이터 처리 (H0UNASP0)
                     elif tr_id == "H0UNASP0" and all_fields_str:
-                        # 개행문자(\n)로 레코드 분리 후 각 레코드를 ^로 필드 분리
-                        record_lines = [
-                            line for line in all_fields_str.split("\n") if line.strip()
-                        ]
+                        try:
+                            record_count = int(record_count_str)
+                        except ValueError:
+                            logger.error(f"레코드 개수 파싱 실패: {record_count_str}")
+                            return
 
-                        for i, line in enumerate(record_lines):
-                            record_fields = line.split("^")
+                        all_fields = all_fields_str.split("^")
+                        FIELDS_PER_RECORD = 59
 
-                            if len(record_fields) >= 3:
-                                parsed_data = self._parse_asking_price_data(record_fields)
+                        for i in range(record_count):
+                            start_idx = i * FIELDS_PER_RECORD
+                            end_idx = min(start_idx + FIELDS_PER_RECORD, len(all_fields))
+                            record_fields = all_fields[start_idx:end_idx]
 
-                                await self._save_asking_price_to_redis(parsed_data)
+                            if len(record_fields) < 3:
+                                continue
 
-                                logger.debug(
-                                    f"✓ 실시간 호가 데이터 저장 [{i+1}/{len(record_lines)}]: "
-                                    f"{parsed_data.get('MKSC_SHRN_ISCD')} - "
-                                    f"매도1호가={parsed_data.get('ASKP1')}, "
-                                    f"매수1호가={parsed_data.get('BIDP1')}"
-                                )
-                                await self._send_asking_price_to_kafka(parsed_data)
+                            parsed_data = self._parse_asking_price_data(record_fields)
+
+                            await self._save_asking_price_to_redis(parsed_data)
+
+                            logger.debug(
+                                f"✓ 실시간 호가 데이터 저장 [{i+1}/{record_count}]: "
+                                f"{parsed_data.get('MKSC_SHRN_ISCD')} - "
+                                f"매도1호가={parsed_data.get('ASKP1')}, "
+                                f"매수1호가={parsed_data.get('BIDP1')}"
+                            )
+                            await self._send_asking_price_to_kafka(parsed_data)
                 
                 return
             
