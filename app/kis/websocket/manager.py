@@ -624,9 +624,16 @@ class WebSocketManager:
                     logger.error(f"Error stopping account websocket {account_no}: {e}", exc_info=True)
                 finally:
                     del self._account_clients[account_no]
-            
+
             # Redis에서 연결 정보 삭제 (항상 실행 - client가 None이어도 Redis에 정보가 남아있을 수 있음)
             self._redis_manager.delete_account_connection(account_no)
+
+        # ALL인 경우: _account_clients에 없지만 Redis에 남아있는 연결 정보도 모두 정리
+        if target == "ALL":
+            remaining_connections = self._redis_manager.get_all_account_connections()
+            for account_no in remaining_connections:
+                self._redis_manager.delete_account_connection(account_no)
+                logger.info(f"Cleaned up orphaned Redis account connection: {account_no}")
 
     async def update_price_stocks(self, new_stocks: List[str]) -> bool:
         """
