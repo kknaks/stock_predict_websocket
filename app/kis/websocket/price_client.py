@@ -542,6 +542,10 @@ class PriceWebSocketClient:
                         # ^로 전체 split 후 59개씩 \n으로 묶어서 pd.read_csv로 파싱
                         fields = all_fields_str.split("^")
                         n = len(self.ASKING_PRICE_COLUMNS)  # 59
+                        logger.info(
+                            f"[H0UNASP0] 총필드수={len(fields)}, "
+                            f"예상레코드={len(fields)//n}건(나머지={len(fields)%n})"
+                        )
                         lines = []
                         for i in range(0, len(fields), n):
                             chunk = fields[i:i + n]
