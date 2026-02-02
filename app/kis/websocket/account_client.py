@@ -179,7 +179,7 @@ class AccountWebSocketClient:
 
             try:
                 self._websocket = await asyncio.wait_for(
-                    websockets.connect(uri),
+                    websockets.connect(uri, ping_interval=None),
                     timeout=10.0
                 )
             except asyncio.TimeoutError:
@@ -655,7 +655,15 @@ class AccountWebSocketClient:
             
             tr_id = header.get("tr_id", "")
             tr_key = header.get("tr_key", "")
-            
+
+            # PINGPONG 처리 - 원본 데이터를 그대로 pong으로 반환
+            if tr_id == "PINGPONG":
+                logger.info(f"✓ PING 메시지 수신 - account ({self.account_no})")
+                if self._websocket:
+                    await self._websocket.pong(message.encode("utf-8"))
+                    logger.debug(f"Sent PONG response ({self.account_no})")
+                return
+
             # 체결통보 확인 (H0STCNI0: 실전, H0STCNI9: 모의)
             if tr_id in ("H0STCNI0", "H0STCNI9") or "체결" in str(body):
                 logger.info(

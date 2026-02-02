@@ -192,7 +192,7 @@ class PriceWebSocketClient:
 
             try:
                 self._websocket = await asyncio.wait_for(
-                    websockets.connect(uri),
+                    websockets.connect(uri, ping_interval=None),
                     timeout=10.0
                 )
             except asyncio.TimeoutError:
@@ -417,7 +417,7 @@ class PriceWebSocketClient:
                 # PING 메시지 처리
                 if tr_id == "PINGPONG":
                     logger.info("✓ PING 메시지 수신 (연결 유지 중)")
-                    await self._handle_ping(data)
+                    await self._handle_ping(message)
                     return
                 
                 # 구독 성공 응답 처리
@@ -680,19 +680,15 @@ class PriceWebSocketClient:
             logger.warning(f"Redis 저장 실패: {e}")
 
 
-    async def _handle_ping(self, ping_data: dict) -> None:
-        """PING 메시지에 대한 PONG 응답 및 연결 상태 업데이트"""
+    async def _handle_ping(self, raw_message: str) -> None:
+        """PING 메시지에 대한 PONG 응답 및 연결 상태 업데이트
+
+        KIS 권장: 수신한 원본 데이터를 websocket.pong()으로 그대로 반환
+        """
         try:
-            pong_message = {
-                "header": {
-                    "tr_id": "PINGPONG",
-                    "datetime": ping_data.get("header", {}).get("datetime", "")
-                }
-            }
-            
             if self._websocket:
-                await self._websocket.send(json.dumps(pong_message))
-                logger.debug("Sent PONG response")
+                await self._websocket.pong(raw_message.encode("utf-8"))
+                logger.debug("Sent PONG response (raw data)")
                 
                 # 마지막 PING 시간 업데이트
                 self._last_ping_time = datetime.now()
