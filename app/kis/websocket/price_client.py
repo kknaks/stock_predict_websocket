@@ -309,7 +309,7 @@ class PriceWebSocketClient:
                 try:
                     # 원본 메시지 로깅 (디버깅용 - 파이프 형식 데이터 확인)
                     if "|" in message:
-                        logger.info(f"[RAW DATA MESSAGE] {message[:300]}...")  # 처음 300자만
+                        logger.info(f"[RAW DATA MESSAGE] len={len(message)} | {message}")  # 전체 출력
                     await self._handle_message(message)
                 except WebSocketMessageError as e:
                     # 메시지 에러는 로깅 후 계속 진행
