@@ -110,9 +110,9 @@ class PriceWebSocketClient:
         self._connection_failed = False
         self._redis_manager = get_redis_manager()
 
-        # PING/PONG 추적 (자동 재연결용)
-        self._last_ping_time: Optional[datetime] = None
-        self._ping_timeout_seconds = 60  # 60초 동안 PING이 없으면 재연결
+        # 활동 추적 (자동 재연결용) - 데이터든 PING이든 수신되면 갱신
+        self._last_activity_time: Optional[datetime] = None
+        self._activity_timeout_seconds = 120  # 120초 동안 아무 수신이 없으면 재연결
 
         # 시그널 실행기
         self._signal_executor = get_signal_executor()
@@ -216,7 +216,7 @@ class PriceWebSocketClient:
             self._running = True
             self._reconnect_attempts = 0
             self._connection_failed = False
-            self._last_ping_time = None  # 연결 시 PING 시간 초기화
+            self._last_activity_time = None  # 연결 시 활동 시간 초기화
             logger.info("Price websocket connected")
 
             # Redis에 연결 정보 저장
@@ -343,6 +343,7 @@ class PriceWebSocketClient:
 
                 message_count += 1
                 last_message_time = datetime.now()
+                self._last_activity_time = last_message_time
                 
                 # 주기적으로 메시지 수신 상태 로깅 (100개마다)
                 if message_count % 100 == 0:
@@ -395,6 +396,12 @@ class PriceWebSocketClient:
 
     async def _handle_message(self, message: str) -> None:
         """메시지 처리 (KIS WebSocket은 하나의 프레임에 여러 메시지를 SOH(\x01)로 구분하여 전송)"""
+        # PINGPONG은 SOH 분리 전에 먼저 체크
+        if "PINGPONG" in message:
+            logger.info("✓ PING 메시지 수신 - price websocket")
+            await self._handle_ping(message)
+            return
+
         # SOH 구분자로 여러 메시지가 묶여올 수 있으므로 분리하여 각각 처리
         if "\x01" in message:
             sub_messages = message.split("\x01")
@@ -416,7 +423,7 @@ class PriceWebSocketClient:
                 
                 # PING 메시지 처리
                 if tr_id == "PINGPONG":
-                    logger.info("✓ PING 메시지 수신 (연결 유지 중)")
+                    logger.info("✓ PING 메시지 수신 - price websocket")
                     await self._handle_ping(message)
                     return
                 
@@ -690,8 +697,8 @@ class PriceWebSocketClient:
                 await self._websocket.pong(raw_message.encode("utf-8"))
                 logger.debug("Sent PONG response (raw data)")
                 
-                # 마지막 PING 시간 업데이트
-                self._last_ping_time = datetime.now()
+                # 활동 시간 업데이트
+                self._last_activity_time = datetime.now()
                 
                 # PING/PONG으로 연결 상태 확인 - Redis에 마지막 활동 시간 업데이트
                 self._redis_manager.update_connection_status(
@@ -703,16 +710,16 @@ class PriceWebSocketClient:
             logger.warning(f"Failed to send PONG response: {e}")
     
     async def _check_ping_timeout(self) -> None:
-        """PING 타임아웃 체크 - 일정 시간 동안 PING이 없으면 재연결"""
+        """활동 타임아웃 체크 - 일정 시간 동안 아무 수신이 없으면 재연결"""
         try:
             while self._running:
                 await asyncio.sleep(10)  # 10초마다 체크
-                
-                if self._last_ping_time:
-                    elapsed = (datetime.now() - self._last_ping_time).total_seconds()
-                    if elapsed > self._ping_timeout_seconds:
+
+                if self._last_activity_time:
+                    elapsed = (datetime.now() - self._last_activity_time).total_seconds()
+                    if elapsed > self._activity_timeout_seconds:
                         logger.warning(
-                            f"PING timeout: {elapsed:.1f}초 동안 PING이 없음. 재연결 시도..."
+                            f"Activity timeout: {elapsed:.1f}초 동안 수신 없음. 재연결 시도..."
                         )
                         # 연결 종료하여 재연결 트리거
                         if self._websocket:
