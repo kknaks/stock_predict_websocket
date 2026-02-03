@@ -98,7 +98,7 @@ class SignalExecutor:
                         time_diff = current_time - opening_time
 
                         # 10분 초과 시 스킵
-                        if time_diff > timedelta(minutes=10):
+                        if time_diff > timedelta(minutes=100):
                             logger.debug(
                                 f"시가 매수 조건 불만족 (10분 초과): "
                                 f"종목={stock_code}, "
