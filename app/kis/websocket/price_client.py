@@ -38,13 +38,13 @@ logger = logging.getLogger(__name__)
 class PriceWebSocketClient:
     """가격 웹소켓 클라이언트"""
 
-    # H0UNCNT0 체결가 컬럼 (46개 - KIS 공식 스펙)
+    # H0STCNT0 체결가 컬럼 (46개 - KIS 공식 스펙, KRX)
     PRICE_COLUMNS = [
         "MKSC_SHRN_ISCD", "STCK_CNTG_HOUR", "STCK_PRPR", "PRDY_VRSS_SIGN",
         "PRDY_VRSS", "PRDY_CTRT", "WGHN_AVRG_STCK_PRC", "STCK_OPRC",
         "STCK_HGPR", "STCK_LWPR", "ASKP1", "BIDP1", "CNTG_VOL", "ACML_VOL",
         "ACML_TR_PBMN", "SELN_CNTG_CSNU", "SHNU_CNTG_CSNU", "NTBY_CNTG_CSNU",
-        "CTTR", "SELN_CNTG_SMTN", "SHNU_CNTG_SMTN", "CNTG_CLS_CODE",
+        "CTTR", "SELN_CNTG_SMTN", "SHNU_CNTG_SMTN", "CCLD_DVSN",
         "SHNU_RATE", "PRDY_VOL_VRSS_ACML_VOL_RATE", "OPRC_HOUR",
         "OPRC_VRSS_PRPR_SIGN", "OPRC_VRSS_PRPR", "HGPR_HOUR",
         "HGPR_VRSS_PRPR_SIGN", "HGPR_VRSS_PRPR", "LWPR_HOUR",
@@ -55,7 +55,7 @@ class PriceWebSocketClient:
         "HOUR_CLS_CODE", "MRKT_TRTM_CLS_CODE", "VI_STND_PRC",
     ]
 
-    # H0UNASP0 호가 컬럼 (65개 - 실제 데이터 기준)
+    # H0STASP0 호가 컬럼 (56개 - KIS 공식 스펙, KRX)
     ASKING_PRICE_COLUMNS = [
         "MKSC_SHRN_ISCD", "BSOP_HOUR", "HOUR_CLS_CODE",
         "ASKP1", "ASKP2", "ASKP3", "ASKP4", "ASKP5",
@@ -73,8 +73,6 @@ class PriceWebSocketClient:
         "ACML_VOL", "TOTAL_ASKP_RSQN_ICDC", "TOTAL_BIDP_RSQN_ICDC",
         "OVTM_TOTAL_ASKP_ICDC", "OVTM_TOTAL_BIDP_ICDC",
         "STCK_DEAL_CLS_CODE",
-        "KMID_PRC", "KMID_TOTAL_RSQN", "KMID_CLS_CODE",
-        "NMID_PRC", "NMID_TOTAL_RSQN", "NMID_CLS_CODE",
     ]
 
     def __init__(
@@ -246,7 +244,7 @@ class PriceWebSocketClient:
         try:
             # 각 종목별로 개별 구독 (한 번에 여러 종목 구독이 안 될 수 있음)
             for stock in self.stocks:
-                # 1. 실시간 체결가 구독 (H0UNCNT0)
+                # 1. 실시간 체결가 구독 (H0STCNT0)
                 subscribe_message_price = {
                     "header": {
                         "approval_key": self.ws_token,
@@ -256,13 +254,13 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0UNCNT0",  # 실시간 주식 체결가 (통합)
+                            "tr_id": "H0STCNT0",  # 실시간 주식 체결가 (통합)
                             "tr_key": stock,  # 단일 종목코드
                         }
                     }
                 }
 
-                # 2. 실시간 호가 구독 (H0UNASP0)
+                # 2. 실시간 호가 구독 (H0STASP0)
                 subscribe_message_asking = {
                     "header": {
                         "approval_key": self.ws_token,
@@ -272,7 +270,7 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0UNASP0",  # 실시간 주식 호가 (통합)
+                            "tr_id": "H0STASP0",  # 실시간 주식 호가 (통합)
                             "tr_key": stock,  # 단일 종목코드
                         }
                     }
@@ -478,9 +476,9 @@ class PriceWebSocketClient:
                 return
             
             # 파이프(|)로 구분된 텍스트 형식 (실제 가격 데이터)
-            # 형식: 0|H0UNCNT0|004|005930^123929^...(체결데이터1)...^005930^123929^...(체결데이터2)...
+            # 형식: 0|H0STCNT0|004|005930^123929^...(체결데이터1)...^005930^123929^...(체결데이터2)...
             # - 첫 번째: 암호화 유무 (0=암호화 안됨, 1=암호화됨)
-            # - 두 번째: tr_id (예: "H0UNCNT0", "H0UNASP0")
+            # - 두 번째: tr_id (예: "H0STCNT0", "H0STASP0")
             # - 세 번째: 레코드 개수 (예: "001", "002", "004")
             # - 네 번째: 모든 데이터가 ^로 구분되어 연속으로 들어옴
             if "|" in message:
@@ -490,8 +488,8 @@ class PriceWebSocketClient:
                     tr_id = records[1]  # TR_ID
                     all_fields_str = records[3]  # 모든 필드가 ^로 구분된 문자열
                     
-                    # 체결가 데이터 처리 (H0UNCNT0)
-                    if tr_id == "H0UNCNT0" and all_fields_str:
+                    # 체결가 데이터 처리 (H0STCNT0)
+                    if tr_id == "H0STCNT0" and all_fields_str:
                         # ^로 전체 split 후 46개씩 \n으로 묶어서 pd.read_csv로 파싱
                         fields = all_fields_str.split("^")
                         n = len(self.PRICE_COLUMNS)  # 46
@@ -513,10 +511,10 @@ class PriceWebSocketClient:
                                 dtype=object,
                             )
                         except Exception as e:
-                            logger.info(f"[H0UNCNT0] 파싱 실패: {e}")
+                            logger.info(f"[H0STCNT0] 파싱 실패: {e}")
                             return
 
-                        # logger.info(f"[H0UNCNT0] 파싱 결과: {len(df)}건")
+                        # logger.info(f"[H0STCNT0] 파싱 결과: {len(df)}건")
 
                         for _, row in df.iterrows():
                             parsed_data = row.dropna().to_dict()
@@ -525,7 +523,7 @@ class PriceWebSocketClient:
                             current_price = parsed_data.get("STCK_PRPR", "")
 
                             # logger.info(
-                            #     f"[H0UNCNT0] 레코드: 종목={stock_code}, "
+                            #     f"[H0STCNT0] 레코드: 종목={stock_code}, "
                             #     f"현재가={current_price}, "
                             #     f"시가={parsed_data.get('STCK_OPRC', '')}, "
                             #     f"매도1={parsed_data.get('ASKP1', '')}, "
@@ -542,12 +540,12 @@ class PriceWebSocketClient:
                             await self._send_to_kafka(parsed_data)
 
                             # logger.info(
-                            #     f"[H0UNCNT0] Kafka 발행: {stock_code} - "
+                            #     f"[H0STCNT0] Kafka 발행: {stock_code} - "
                             #     f"{current_price}원"
                             # )
                     
-                    # 호가 데이터 처리 (H0UNASP0)
-                    elif tr_id == "H0UNASP0" and all_fields_str:
+                    # 호가 데이터 처리 (H0STASP0)
+                    elif tr_id == "H0STASP0" and all_fields_str:
                         # ^로 전체 split 후 59개씩 \n으로 묶어서 pd.read_csv로 파싱
                         fields = all_fields_str.split("^")
                         n = len(self.ASKING_PRICE_COLUMNS)  # 65
@@ -569,17 +567,17 @@ class PriceWebSocketClient:
                                 dtype=object,
                             )
                         except Exception as e:
-                            logger.warning(f"[H0UNASP0] 파싱 실패: {e}")
+                            logger.warning(f"[H0STASP0] 파싱 실패: {e}")
                             return
 
-                        # logger.info(f"[H0UNASP0] 파싱 결과: {len(df)}건")
+                        # logger.info(f"[H0STASP0] 파싱 결과: {len(df)}건")
 
                         for _, row in df.iterrows():
                             parsed_data = row.dropna().to_dict()
 
                             # stock_code = parsed_data.get("MKSC_SHRN_ISCD", "")
                             # logger.info(
-                            #     f"[H0UNASP0] 레코드: 종목={stock_code}, "
+                            #     f"[H0STASP0] 레코드: 종목={stock_code}, "
                             #     f"매도1={parsed_data.get('ASKP1', '')}, "
                             #     f"매수1={parsed_data.get('BIDP1', '')}, "
                             #     f"총매도잔량={parsed_data.get('TOTAL_ASKP_RSQN', '')}, "
@@ -591,7 +589,7 @@ class PriceWebSocketClient:
                             await self._send_asking_price_to_kafka(parsed_data)
 
                             # logger.info(
-                            #     f"[H0UNASP0] Kafka 발행: {stock_code}"
+                            #     f"[H0STASP0] Kafka 발행: {stock_code}"
                             # )
                 
                 return
@@ -795,7 +793,7 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0UNCNT0",  # 체결가 구독 해제
+                            "tr_id": "H0STCNT0",  # 체결가 구독 해제
                             "tr_key": ",".join(self.stocks),
                         }
                     }
@@ -816,7 +814,7 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0UNASP0",  # 호가 구독 해제
+                            "tr_id": "H0STASP0",  # 호가 구독 해제
                             "tr_key": ",".join(self.stocks),
                         }
                     }
@@ -861,7 +859,7 @@ class PriceWebSocketClient:
         try:
             # 각 종목별로 개별 해제 (한 번에 여러 종목 해제가 안 될 수 있음)
             for stock in stocks:
-                # 1. 체결가 구독 해제 (H0UNCNT0)
+                # 1. 체결가 구독 해제 (H0STCNT0)
                 unsubscribe_message_price = {
                     "header": {
                         "approval_key": self.ws_token,
@@ -871,7 +869,7 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0UNCNT0",  # 체결가 구독 해제
+                            "tr_id": "H0STCNT0",  # 체결가 구독 해제
                             "tr_key": stock,  # 단일 종목코드
                         }
                     }
@@ -883,7 +881,7 @@ class PriceWebSocketClient:
                 )
                 logger.debug(f"체결가 구독 해제 요청 전송: {stock}")
 
-                # 2. 호가 구독 해제 (H0UNASP0)
+                # 2. 호가 구독 해제 (H0STASP0)
                 unsubscribe_message_asking = {
                     "header": {
                         "approval_key": self.ws_token,
@@ -893,7 +891,7 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0UNASP0",  # 호가 구독 해제
+                            "tr_id": "H0STASP0",  # 호가 구독 해제
                             "tr_key": stock,  # 단일 종목코드
                         }
                     }
@@ -937,7 +935,7 @@ class PriceWebSocketClient:
         try:
             # 각 종목별로 개별 구독 (한 번에 여러 종목 구독이 안 될 수 있음)
             for stock in stocks:
-                # 1. 체결가 구독 (H0UNCNT0)
+                # 1. 체결가 구독 (H0STCNT0)
                 subscribe_message_price = {
                     "header": {
                         "approval_key": self.ws_token,
@@ -947,7 +945,7 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0UNCNT0",  # 체결가 구독
+                            "tr_id": "H0STCNT0",  # 체결가 구독
                             "tr_key": stock,  # 단일 종목코드
                         }
                     }
@@ -959,7 +957,7 @@ class PriceWebSocketClient:
                 )
                 logger.debug(f"체결가 구독 요청 전송: {stock}")
 
-                # 2. 호가 구독 (H0UNASP0)
+                # 2. 호가 구독 (H0STASP0)
                 subscribe_message_asking = {
                     "header": {
                         "approval_key": self.ws_token,
@@ -969,7 +967,7 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0UNASP0",  # 호가 구독
+                            "tr_id": "H0STASP0",  # 호가 구독
                             "tr_key": stock,  # 단일 종목코드
                         }
                     }
