@@ -7,7 +7,7 @@ Redis WebSocket Connection State Manager
 import json
 import logging
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import redis
 from redis.exceptions import RedisError
@@ -58,6 +58,12 @@ class WebSocketRedisManager:
         """계좌별 Redis 키 생성"""
         return f"{self.ACCOUNT_KEY_PREFIX}:{account_no}"
 
+    def _get_price_key(self, exchange_type: Optional[str] = None) -> str:
+        """exchange_type별 가격 웹소켓 Redis 키 생성"""
+        if exchange_type:
+            return f"{self.KEY_PREFIX}:price:{exchange_type}"
+        return self.PRICE_KEY
+
     def save_price_connection(
         self,
         ws_token: str,
@@ -66,6 +72,7 @@ class WebSocketRedisManager:
         stocks: list,
         status: str = "connected",
         reconnect_attempts: int = 0,
+        exchange_type: Optional[str] = None,
     ) -> bool:
         """
         가격 웹소켓 연결 정보 저장
@@ -77,6 +84,7 @@ class WebSocketRedisManager:
             stocks: 종목 코드 리스트
             status: 연결 상태
             reconnect_attempts: 재연결 시도 횟수
+            exchange_type: 거래소 타입 (NXT, KRX)
 
         Returns:
             성공 여부
@@ -96,13 +104,16 @@ class WebSocketRedisManager:
                 "connected_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
             }
+            if exchange_type:
+                data["exchange_type"] = exchange_type
 
+            price_key = self._get_price_key(exchange_type)
             self._redis_client.setex(
-                self.PRICE_KEY,
+                price_key,
                 self.TTL,
                 json.dumps(data, ensure_ascii=False)
             )
-            logger.debug(f"Price websocket connection saved to Redis")
+            logger.debug(f"Price websocket connection saved to Redis: {price_key}")
             return True
 
         except RedisError as e:
@@ -112,9 +123,12 @@ class WebSocketRedisManager:
             logger.error(f"Unexpected error saving price connection: {e}", exc_info=True)
             return False
 
-    def get_price_connection(self) -> Optional[Dict[str, Any]]:
+    def get_price_connection(self, exchange_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         가격 웹소켓 연결 정보 조회
+
+        Args:
+            exchange_type: 거래소 타입 (NXT, KRX)
 
         Returns:
             연결 정보 딕셔너리 또는 None
@@ -124,7 +138,8 @@ class WebSocketRedisManager:
             return None
 
         try:
-            data = self._redis_client.get(self.PRICE_KEY)
+            price_key = self._get_price_key(exchange_type)
+            data = self._redis_client.get(price_key)
             if data:
                 return json.loads(data)
             return None
@@ -138,6 +153,50 @@ class WebSocketRedisManager:
         except Exception as e:
             logger.error(f"Unexpected error getting price connection: {e}", exc_info=True)
             return None
+
+    def get_all_price_connections(self) -> Dict[str, Dict[str, Any]]:
+        """
+        모든 가격 웹소켓 연결 정보 조회 (NXT + KRX)
+
+        Returns:
+            {exchange_type: connection_info} 딕셔너리
+        """
+        if not self._redis_client:
+            return {}
+
+        try:
+            connections = {}
+            pattern = f"{self.KEY_PREFIX}:price:*"
+            keys = self._redis_client.keys(pattern)
+
+            for key in keys:
+                try:
+                    data = self._redis_client.get(key)
+                    if data:
+                        conn_data = json.loads(data)
+                        # 키에서 exchange_type 추출: websocket:price:NXT -> NXT
+                        exchange = key.split(":")[-1] if isinstance(key, str) else key.decode().split(":")[-1]
+                        connections[exchange] = conn_data
+                except Exception as e:
+                    logger.warning(f"Failed to parse price connection data for key {key}: {e}")
+
+            # 기존 하위호환: websocket:price 키도 확인
+            legacy_data = self._redis_client.get(self.PRICE_KEY)
+            if legacy_data:
+                try:
+                    conn_data = json.loads(legacy_data)
+                    connections["DEFAULT"] = conn_data
+                except Exception:
+                    pass
+
+            return connections
+
+        except RedisError as e:
+            logger.error(f"Failed to get all price connections from Redis: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"Unexpected error getting all price connections: {e}", exc_info=True)
+            return {}
 
     def get_current_price(self, stock_code: str) -> Optional[float]:
         """
@@ -422,6 +481,7 @@ class WebSocketRedisManager:
         account_no: Optional[str] = None,
         status: str = "connected",
         reconnect_attempts: int = 0,
+        exchange_type: Optional[str] = None,
     ) -> bool:
         """
         연결 상태 업데이트
@@ -431,6 +491,7 @@ class WebSocketRedisManager:
             account_no: 계좌번호 (account 타입인 경우)
             status: 연결 상태
             reconnect_attempts: 재연결 시도 횟수
+            exchange_type: 거래소 타입 (NXT, KRX) - price 타입에서 사용
 
         Returns:
             성공 여부
@@ -440,13 +501,14 @@ class WebSocketRedisManager:
 
         try:
             if connection_type == "price":
-                data = self.get_price_connection()
+                data = self.get_price_connection(exchange_type)
                 if data:
                     data["status"] = status
                     data["reconnect_attempts"] = reconnect_attempts
                     data["updated_at"] = datetime.now().isoformat()
+                    price_key = self._get_price_key(exchange_type)
                     self._redis_client.setex(
-                        self.PRICE_KEY,
+                        price_key,
                         self.TTL,
                         json.dumps(data, ensure_ascii=False)
                     )
@@ -471,17 +533,43 @@ class WebSocketRedisManager:
             logger.error(f"Failed to update connection status: {e}", exc_info=True)
             return False
 
-    def delete_price_connection(self) -> bool:
-        """가격 웹소켓 연결 정보 삭제"""
+    def delete_price_connection(self, exchange_type: Optional[str] = None) -> bool:
+        """가격 웹소켓 연결 정보 삭제
+
+        Args:
+            exchange_type: 거래소 타입 (NXT, KRX). None이면 기존 기본 키 삭제.
+        """
         if not self._redis_client:
             return False
 
         try:
-            self._redis_client.delete(self.PRICE_KEY)
-            logger.debug("Price websocket connection deleted from Redis")
+            price_key = self._get_price_key(exchange_type)
+            self._redis_client.delete(price_key)
+            logger.debug(f"Price websocket connection deleted from Redis: {price_key}")
             return True
         except RedisError as e:
             logger.error(f"Failed to delete price connection from Redis: {e}")
+            return False
+
+    def delete_all_price_connections(self) -> bool:
+        """모든 가격 웹소켓 연결 정보 삭제 (NXT + KRX + DEFAULT)"""
+        if not self._redis_client:
+            return False
+
+        try:
+            # exchange_type별 키 삭제
+            pattern = f"{self.KEY_PREFIX}:price:*"
+            keys = self._redis_client.keys(pattern)
+            for key in keys:
+                self._redis_client.delete(key)
+
+            # 기본 키도 삭제
+            self._redis_client.delete(self.PRICE_KEY)
+
+            logger.debug("All price websocket connections deleted from Redis")
+            return True
+        except RedisError as e:
+            logger.error(f"Failed to delete all price connections from Redis: {e}")
             return False
 
     def delete_account_connection(self, account_no: str) -> bool:

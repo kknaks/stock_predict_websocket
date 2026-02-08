@@ -23,7 +23,6 @@ class PredictionHandler:
         self._prediction_history: List[PredictionMessage] = []
         self._max_history = 100  # 최대 보관 개수
         self._websocket_manager = get_websocket_manager()
-        self._nxt_had_candidates: bool = False  # nxt에서 후보가 있었는지 추적
 
     @property
     def latest_predictions(self) -> Optional[PredictionMessage]:
@@ -39,13 +38,17 @@ class PredictionHandler:
         """
         예측 결과 메시지 처리
 
+        NXT/KRX 별도 커넥션이므로 각 예측을 해당 exchange의 price client로 직접 라우팅.
+
         Args:
             message: Kafka에서 수신한 예측 메시지
         """
+        exchange_type = message.exchange_type.upper() if message.exchange_type else None
         logger.info(
             f"Processing prediction message: "
             f"timestamp={message.timestamp}, "
-            f"total_count={message.total_count}"
+            f"total_count={message.total_count}, "
+            f"exchange_type={exchange_type}"
         )
 
         # 최신 예측 저장
@@ -68,28 +71,18 @@ class PredictionHandler:
         ]
         candidate_stocks = sorted(candidate_stocks, key=lambda x: x.prob_up, reverse=True)[:10]
 
-        logger.info(f"Candidate stocks: {candidate_stocks}")
-        
-        # 전략 테이블에 예측 데이터 처리 (목표가 계산) - 필터링된 후보군만 전달
+        logger.info(f"Candidate stocks ({exchange_type}): {candidate_stocks}")
+
+        # 전략 테이블에 예측 데이터 처리 (목표가 계산) - exchange_type 전달
         strategy_table = get_strategy_table()
         try:
-            await strategy_table.process_predictions(candidate_stocks)
+            await strategy_table.process_predictions(candidate_stocks, exchange_type=exchange_type)
             logger.info(f"Processed {len(candidate_stocks)} candidate stocks for strategy tables")
         except Exception as e:
             logger.error(f"Error processing predictions for strategy tables: {e}", exc_info=True)
-        
-        # 웹소켓 종목 업데이트 (exchange_type 기반 분기)
-        exchange_type = message.exchange_type.lower()
-        if exchange_type == "nxt":
-            self._nxt_had_candidates = len(candidate_stocks) > 0
-            await self._update_websocket_stocks(candidate_stocks)
-        else:
-            # nxt에서 후보가 없었으면 삼성전자가 아직 구독 중이므로 교체(update)
-            # nxt에서 후보가 있었으면 기존 구독에 추가(add)
-            if self._nxt_had_candidates:
-                await self._add_websocket_stocks(candidate_stocks)
-            else:
-                await self._update_websocket_stocks(candidate_stocks)
+
+        # 웹소켓 종목 업데이트 - 해당 exchange의 price client로 직접 라우팅
+        await self._update_websocket_stocks(candidate_stocks, exchange_type=exchange_type)
 
     def _log_predictions(self, message: PredictionMessage) -> None:
         """예측 결과 요약 로깅"""
@@ -147,30 +140,34 @@ class PredictionHandler:
         )
         return sorted_preds[:n]
 
-    async def _update_websocket_stocks(self, candidate_stocks: dict[any, any]) -> None:
+    async def _update_websocket_stocks(
+        self, candidate_stocks: list, exchange_type: Optional[str] = None
+    ) -> None:
         """예측 결과의 종목 리스트로 웹소켓 종목 업데이트"""
         if not candidate_stocks:
             logger.warning("No predictions to update websocket stocks")
             return
-        
+
         # 예측 결과에서 종목 코드 추출
         stock_codes = [pred.stock_code for pred in candidate_stocks]
         # 중복 제거
         unique_stocks = list(set(stock_codes))
-        
+
         logger.info(
-            f"Updating websocket stocks: {len(unique_stocks)} stocks "
+            f"Updating websocket stocks ({exchange_type}): {len(unique_stocks)} stocks "
             f"from {len(candidate_stocks)} predictions"
         )
-        
-        # 웹소켓 매니저에 종목 업데이트 요청
-        success = await self._websocket_manager.update_price_stocks(unique_stocks)
-        if success:
-            logger.info(f"Websocket stocks updated successfully: {len(unique_stocks)} stocks")
-        else:
-            logger.warning("Failed to update websocket stocks")
 
-    async def _add_websocket_stocks(self, candidate_stocks: dict[any, any]) -> None:
+        # 웹소켓 매니저에 종목 업데이트 요청
+        success = await self._websocket_manager.update_price_stocks(unique_stocks, exchange_type=exchange_type)
+        if success:
+            logger.info(f"Websocket stocks updated successfully ({exchange_type}): {len(unique_stocks)} stocks")
+        else:
+            logger.warning(f"Failed to update websocket stocks ({exchange_type})")
+
+    async def _add_websocket_stocks(
+        self, candidate_stocks: list, exchange_type: Optional[str] = None
+    ) -> None:
         """예측 결과의 종목 리스트를 기존 구독에 추가"""
         if not candidate_stocks:
             logger.warning("No predictions to add websocket stocks")
@@ -180,15 +177,15 @@ class PredictionHandler:
         unique_stocks = list(set(stock_codes))
 
         logger.info(
-            f"Adding websocket stocks: {len(unique_stocks)} stocks "
+            f"Adding websocket stocks ({exchange_type}): {len(unique_stocks)} stocks "
             f"from {len(candidate_stocks)} predictions"
         )
 
-        success = await self._websocket_manager.add_price_stocks(unique_stocks)
+        success = await self._websocket_manager.add_price_stocks(unique_stocks, exchange_type=exchange_type)
         if success:
-            logger.info(f"Websocket stocks added successfully: {len(unique_stocks)} stocks")
+            logger.info(f"Websocket stocks added successfully ({exchange_type}): {len(unique_stocks)} stocks")
         else:
-            logger.warning("Failed to add websocket stocks")
+            logger.warning(f"Failed to add websocket stocks ({exchange_type})")
 
     def clear_history(self) -> None:
         """히스토리 초기화"""

@@ -55,6 +55,23 @@ class PriceWebSocketClient:
         "HOUR_CLS_CODE", "MRKT_TRTM_CLS_CODE", "VI_STND_PRC",
     ]
 
+    # H0NXCNT0 체결가 컬럼 (46개 - NXT, CCLD_DVSN → CNTG_CLS_CODE)
+    NXT_PRICE_COLUMNS = [
+        "MKSC_SHRN_ISCD", "STCK_CNTG_HOUR", "STCK_PRPR", "PRDY_VRSS_SIGN",
+        "PRDY_VRSS", "PRDY_CTRT", "WGHN_AVRG_STCK_PRC", "STCK_OPRC",
+        "STCK_HGPR", "STCK_LWPR", "ASKP1", "BIDP1", "CNTG_VOL", "ACML_VOL",
+        "ACML_TR_PBMN", "SELN_CNTG_CSNU", "SHNU_CNTG_CSNU", "NTBY_CNTG_CSNU",
+        "CTTR", "SELN_CNTG_SMTN", "SHNU_CNTG_SMTN", "CNTG_CLS_CODE",
+        "SHNU_RATE", "PRDY_VOL_VRSS_ACML_VOL_RATE", "OPRC_HOUR",
+        "OPRC_VRSS_PRPR_SIGN", "OPRC_VRSS_PRPR", "HGPR_HOUR",
+        "HGPR_VRSS_PRPR_SIGN", "HGPR_VRSS_PRPR", "LWPR_HOUR",
+        "LWPR_VRSS_PRPR_SIGN", "LWPR_VRSS_PRPR", "BSOP_DATE",
+        "NEW_MKOP_CLS_CODE", "TRHT_YN", "ASKP_RSQN1", "BIDP_RSQN1",
+        "TOTAL_ASKP_RSQN", "TOTAL_BIDP_RSQN", "VOL_TNRT",
+        "PRDY_SMNS_HOUR_ACML_VOL", "PRDY_SMNS_HOUR_ACML_VOL_RATE",
+        "HOUR_CLS_CODE", "MRKT_TRTM_CLS_CODE", "VI_STND_PRC",
+    ]
+
     # H0STASP0 호가 컬럼 (56개 - KIS 공식 스펙, KRX)
     ASKING_PRICE_COLUMNS = [
         "MKSC_SHRN_ISCD", "BSOP_HOUR", "HOUR_CLS_CODE",
@@ -75,12 +92,42 @@ class PriceWebSocketClient:
         "STCK_DEAL_CLS_CODE",
     ]
 
+    # H0NXASP0 호가 컬럼 (59개 - NXT, KRX 56개 + KMID/NMID 6개)
+    NXT_ASKING_PRICE_COLUMNS = [
+        "MKSC_SHRN_ISCD", "BSOP_HOUR", "HOUR_CLS_CODE",
+        "ASKP1", "ASKP2", "ASKP3", "ASKP4", "ASKP5",
+        "ASKP6", "ASKP7", "ASKP8", "ASKP9", "ASKP10",
+        "BIDP1", "BIDP2", "BIDP3", "BIDP4", "BIDP5",
+        "BIDP6", "BIDP7", "BIDP8", "BIDP9", "BIDP10",
+        "ASKP_RSQN1", "ASKP_RSQN2", "ASKP_RSQN3", "ASKP_RSQN4", "ASKP_RSQN5",
+        "ASKP_RSQN6", "ASKP_RSQN7", "ASKP_RSQN8", "ASKP_RSQN9", "ASKP_RSQN10",
+        "BIDP_RSQN1", "BIDP_RSQN2", "BIDP_RSQN3", "BIDP_RSQN4", "BIDP_RSQN5",
+        "BIDP_RSQN6", "BIDP_RSQN7", "BIDP_RSQN8", "BIDP_RSQN9", "BIDP_RSQN10",
+        "TOTAL_ASKP_RSQN", "TOTAL_BIDP_RSQN",
+        "OVTM_TOTAL_ASKP_RSQN", "OVTM_TOTAL_BIDP_RSQN",
+        "ANTC_CNPR", "ANTC_CNQN", "ANTC_VOL",
+        "ANTC_CNTG_VRSS", "ANTC_CNTG_VRSS_SIGN", "ANTC_CNTG_PRDY_CTRT",
+        "ACML_VOL", "TOTAL_ASKP_RSQN_ICDC", "TOTAL_BIDP_RSQN_ICDC",
+        "OVTM_TOTAL_ASKP_ICDC", "OVTM_TOTAL_BIDP_ICDC",
+        "STCK_DEAL_CLS_CODE",
+        "KMID_PRC", "KMID_TOTAL_RSQN", "KMID_CLS_CODE",
+        "NMID_PRC", "NMID_TOTAL_RSQN", "NMID_CLS_CODE",
+    ]
+
+    # tr_id 매핑
+    TR_ID_MAP = {
+        "KRX": {"price": "H0STCNT0", "asking": "H0STASP0"},
+        "NXT": {"price": "H0NXCNT0", "asking": "H0NXASP0"},
+        "DEFAULT": {"price": "H0STCNT0", "asking": "H0STASP0"},
+    }
+
     def __init__(
         self,
         ws_token: str,
         appkey: str,
         env_dv: str,
         stocks: List[str],
+        exchange_type: Optional[str] = None,
     ):
         """
         Args:
@@ -88,11 +135,13 @@ class PriceWebSocketClient:
             appkey: 앱키
             env_dv: 환경구분 (real: 실전, demo: 모의)
             stocks: 모니터링 종목 코드 리스트
+            exchange_type: 거래소 타입 (NXT, KRX)
         """
         self.ws_token = ws_token
         self.appkey = appkey
         self.env_dv = env_dv
         self.stocks = stocks
+        self.exchange_type = exchange_type
 
         # WebSocket URL 설정
         if env_dv == "real":
@@ -118,6 +167,37 @@ class PriceWebSocketClient:
         # Kafka Producer
         self._price_producer = get_price_producer()
         self._asking_price_producer = get_asking_price_producer()
+
+    @property
+    def _exchange_key(self) -> str:
+        """exchange_type에 해당하는 TR_ID_MAP 키"""
+        if self.exchange_type and self.exchange_type.upper() in self.TR_ID_MAP:
+            return self.exchange_type.upper()
+        return "DEFAULT"
+
+    @property
+    def price_tr_id(self) -> str:
+        """체결가 tr_id (KRX: H0STCNT0, NXT: H0NXCNT0)"""
+        return self.TR_ID_MAP[self._exchange_key]["price"]
+
+    @property
+    def asking_tr_id(self) -> str:
+        """호가 tr_id (KRX: H0STASP0, NXT: H0NXASP0)"""
+        return self.TR_ID_MAP[self._exchange_key]["asking"]
+
+    @property
+    def price_columns(self) -> list:
+        """exchange_type에 맞는 체결가 컬럼"""
+        if self._exchange_key == "NXT":
+            return self.NXT_PRICE_COLUMNS
+        return self.PRICE_COLUMNS
+
+    @property
+    def asking_price_columns(self) -> list:
+        """exchange_type에 맞는 호가 컬럼"""
+        if self._exchange_key == "NXT":
+            return self.NXT_ASKING_PRICE_COLUMNS
+        return self.ASKING_PRICE_COLUMNS
 
     async def connect_and_run(self) -> None:
         """연결 및 실행"""
@@ -147,7 +227,8 @@ class PriceWebSocketClient:
                 self._redis_manager.update_connection_status(
                     "price",
                     status="disconnected",
-                    reconnect_attempts=self._reconnect_attempts
+                    reconnect_attempts=self._reconnect_attempts,
+                    exchange_type=self.exchange_type,
                 )
                 if self._running:
                     await self._reconnect()
@@ -159,7 +240,7 @@ class PriceWebSocketClient:
                 self._connection_failed = True
                 self._running = False
                 # Redis에서 삭제 (인증 에러는 재연결 불가)
-                self._redis_manager.delete_price_connection()
+                self._redis_manager.delete_price_connection(exchange_type=self.exchange_type)
                 break  # 인증 에러는 재시도 불가
             except WebSocketConnectionError as e:
                 logger.error(f"WebSocket connection error: {e}")
@@ -168,7 +249,8 @@ class PriceWebSocketClient:
                 self._redis_manager.update_connection_status(
                     "price",
                     status="reconnecting",
-                    reconnect_attempts=self._reconnect_attempts
+                    reconnect_attempts=self._reconnect_attempts,
+                    exchange_type=self.exchange_type,
                 )
                 if self._running:
                     await self._reconnect()
@@ -225,6 +307,7 @@ class PriceWebSocketClient:
                 stocks=self.stocks,
                 status="connected",
                 reconnect_attempts=0,
+                exchange_type=self.exchange_type,
             )
 
         except (WebSocketAuthError, WebSocketConnectionError, WebSocketTimeoutError):
@@ -244,7 +327,7 @@ class PriceWebSocketClient:
         try:
             # 각 종목별로 개별 구독 (한 번에 여러 종목 구독이 안 될 수 있음)
             for stock in self.stocks:
-                # 1. 실시간 체결가 구독 (H0STCNT0)
+                # 1. 실시간 체결가 구독
                 subscribe_message_price = {
                     "header": {
                         "approval_key": self.ws_token,
@@ -254,13 +337,13 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0STCNT0",  # 실시간 주식 체결가 (통합)
-                            "tr_key": stock,  # 단일 종목코드
+                            "tr_id": self.price_tr_id,
+                            "tr_key": stock,
                         }
                     }
                 }
 
-                # 2. 실시간 호가 구독 (H0STASP0)
+                # 2. 실시간 호가 구독
                 subscribe_message_asking = {
                     "header": {
                         "approval_key": self.ws_token,
@@ -270,8 +353,8 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0STASP0",  # 실시간 주식 호가 (통합)
-                            "tr_key": stock,  # 단일 종목코드
+                            "tr_id": self.asking_tr_id,
+                            "tr_key": stock,
                         }
                     }
                 }
@@ -282,28 +365,29 @@ class PriceWebSocketClient:
                         self._websocket.send(json.dumps(subscribe_message_price)),
                         timeout=5.0
                     )
-                    logger.info(f"체결가 구독 요청 전송: {stock}")
-                    
+                    logger.info(f"체결가 구독 요청 전송 ({self.price_tr_id}): {stock}")
+
                     # 호가 구독
                     await asyncio.wait_for(
                         self._websocket.send(json.dumps(subscribe_message_asking)),
                         timeout=5.0
                     )
-                    logger.info(f"호가 구독 요청 전송: {stock}")
-                    
+                    logger.info(f"호가 구독 요청 전송 ({self.asking_tr_id}): {stock}")
+
                     # 각 종목 구독 요청 사이에 약간의 지연 (서버 처리 시간 확보)
                     await asyncio.sleep(0.1)
-                    
+
                 except asyncio.TimeoutError:
                     raise WebSocketTimeoutError(
                         "Subscription message send timeout",
                         details={"stock": stock}
                     )
 
-            logger.info(f"Subscribed to {len(self.stocks)} stocks (체결가+호가): {self.stocks[:5]}...")
+            exchange_label = f" ({self.exchange_type})" if self.exchange_type else ""
+            logger.info(f"Subscribed to {len(self.stocks)} stocks{exchange_label} (체결가+호가): {self.stocks[:5]}...")
 
             # Slack 알림 전송
-            await send_slack(f"[KIS WebSocket] 연결 완료 - 총 {len(self.stocks)}개 종목 구독 시작")
+            await send_slack(f"[KIS WebSocket] 연결 완료{exchange_label} - 총 {len(self.stocks)}개 종목 구독 시작")
 
         except (WebSocketTimeoutError, WebSocketConnectionError):
             raise
@@ -488,11 +572,13 @@ class PriceWebSocketClient:
                     tr_id = records[1]  # TR_ID
                     all_fields_str = records[3]  # 모든 필드가 ^로 구분된 문자열
                     
-                    # 체결가 데이터 처리 (H0STCNT0)
-                    if tr_id == "H0STCNT0" and all_fields_str:
-                        # ^로 전체 split 후 46개씩 \n으로 묶어서 pd.read_csv로 파싱
+                    # 체결가 데이터 처리 (H0STCNT0 / H0NXCNT0)
+                    if tr_id in ("H0STCNT0", "H0NXCNT0") and all_fields_str:
+                        # tr_id에 맞는 컬럼 선택
+                        columns = self.NXT_PRICE_COLUMNS if tr_id == "H0NXCNT0" else self.PRICE_COLUMNS
+                        # ^로 전체 split 후 컬럼수씩 묶어서 pd.read_csv로 파싱
                         fields = all_fields_str.split("^")
-                        n = len(self.PRICE_COLUMNS)  # 46
+                        n = len(columns)
                         lines = []
                         for i in range(0, len(fields), n):
                             chunk = fields[i:i + n]
@@ -507,28 +593,17 @@ class PriceWebSocketClient:
                                 StringIO("\n".join(lines)),
                                 header=None,
                                 sep="^",
-                                names=self.PRICE_COLUMNS,
+                                names=columns,
                                 dtype=object,
                             )
                         except Exception as e:
-                            logger.info(f"[H0STCNT0] 파싱 실패: {e}")
+                            logger.info(f"[{tr_id}] 파싱 실패: {e}")
                             return
-
-                        # logger.info(f"[H0STCNT0] 파싱 결과: {len(df)}건")
 
                         for _, row in df.iterrows():
                             parsed_data = row.dropna().to_dict()
 
-                            stock_code = parsed_data.get("MKSC_SHRN_ISCD", "")
                             current_price = parsed_data.get("STCK_PRPR", "")
-
-                            # logger.info(
-                            #     f"[H0STCNT0] 레코드: 종목={stock_code}, "
-                            #     f"현재가={current_price}, "
-                            #     f"시가={parsed_data.get('STCK_OPRC', '')}, "
-                            #     f"매도1={parsed_data.get('ASKP1', '')}, "
-                            #     f"매수1={parsed_data.get('BIDP1', '')}"
-                            # )
 
                             # 현재가가 0이면 비정상 데이터 - 스킵
                             if not current_price or current_price == "0":
@@ -539,16 +614,13 @@ class PriceWebSocketClient:
                             await self._signal_executor.check_and_generate_sell_signal(parsed_data)
                             await self._send_to_kafka(parsed_data)
 
-                            # logger.info(
-                            #     f"[H0STCNT0] Kafka 발행: {stock_code} - "
-                            #     f"{current_price}원"
-                            # )
-                    
-                    # 호가 데이터 처리 (H0STASP0)
-                    elif tr_id == "H0STASP0" and all_fields_str:
-                        # ^로 전체 split 후 59개씩 \n으로 묶어서 pd.read_csv로 파싱
+                    # 호가 데이터 처리 (H0STASP0 / H0NXASP0)
+                    elif tr_id in ("H0STASP0", "H0NXASP0") and all_fields_str:
+                        # tr_id에 맞는 컬럼 선택
+                        columns = self.NXT_ASKING_PRICE_COLUMNS if tr_id == "H0NXASP0" else self.ASKING_PRICE_COLUMNS
+                        # ^로 전체 split 후 컬럼수씩 묶어서 pd.read_csv로 파싱
                         fields = all_fields_str.split("^")
-                        n = len(self.ASKING_PRICE_COLUMNS)  # 65
+                        n = len(columns)
                         lines = []
                         for i in range(0, len(fields), n):
                             chunk = fields[i:i + n]
@@ -563,34 +635,18 @@ class PriceWebSocketClient:
                                 StringIO("\n".join(lines)),
                                 header=None,
                                 sep="^",
-                                names=self.ASKING_PRICE_COLUMNS,
+                                names=columns,
                                 dtype=object,
                             )
                         except Exception as e:
-                            logger.warning(f"[H0STASP0] 파싱 실패: {e}")
+                            logger.warning(f"[{tr_id}] 파싱 실패: {e}")
                             return
-
-                        # logger.info(f"[H0STASP0] 파싱 결과: {len(df)}건")
 
                         for _, row in df.iterrows():
                             parsed_data = row.dropna().to_dict()
 
-                            # stock_code = parsed_data.get("MKSC_SHRN_ISCD", "")
-                            # logger.info(
-                            #     f"[H0STASP0] 레코드: 종목={stock_code}, "
-                            #     f"매도1={parsed_data.get('ASKP1', '')}, "
-                            #     f"매수1={parsed_data.get('BIDP1', '')}, "
-                            #     f"총매도잔량={parsed_data.get('TOTAL_ASKP_RSQN', '')}, "
-                            #     f"총매수잔량={parsed_data.get('TOTAL_BIDP_RSQN', '')}, "
-                            #     f"필드수={len(parsed_data)}"
-                            # )
-
                             await self._save_asking_price_to_redis(parsed_data)
                             await self._send_asking_price_to_kafka(parsed_data)
-
-                            # logger.info(
-                            #     f"[H0STASP0] Kafka 발행: {stock_code}"
-                            # )
                 
                 return
             
@@ -702,7 +758,8 @@ class PriceWebSocketClient:
                 self._redis_manager.update_connection_status(
                     "price",
                     status="connected",
-                    reconnect_attempts=self._reconnect_attempts
+                    reconnect_attempts=self._reconnect_attempts,
+                    exchange_type=self.exchange_type,
                 )
         except Exception as e:
             logger.warning(f"Failed to send PONG response: {e}")
@@ -751,7 +808,8 @@ class PriceWebSocketClient:
             self._redis_manager.update_connection_status(
                 "price",
                 status="failed",
-                reconnect_attempts=self._reconnect_attempts
+                reconnect_attempts=self._reconnect_attempts,
+                exchange_type=self.exchange_type,
             )
             return
 
@@ -759,7 +817,8 @@ class PriceWebSocketClient:
         self._redis_manager.update_connection_status(
             "price",
             status="reconnecting",
-            reconnect_attempts=self._reconnect_attempts
+            reconnect_attempts=self._reconnect_attempts,
+            exchange_type=self.exchange_type,
         )
 
         wait_time = min(2 ** self._reconnect_attempts, 60)  # 지수 백오프
@@ -769,7 +828,7 @@ class PriceWebSocketClient:
     async def _load_from_redis(self) -> None:
         """Redis에서 연결 정보 로드 (재연결 시)"""
         try:
-            data = self._redis_manager.get_price_connection()
+            data = self._redis_manager.get_price_connection(exchange_type=self.exchange_type)
             if data:
                 # 토큰이 만료되었을 수 있으므로 주의
                 # 여기서는 기본 정보만 로드하고, 실제 연결은 기존 정보 사용
@@ -793,7 +852,7 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0STCNT0",  # 체결가 구독 해제
+                            "tr_id": self.price_tr_id,
                             "tr_key": ",".join(self.stocks),
                         }
                     }
@@ -802,8 +861,8 @@ class PriceWebSocketClient:
                     self._websocket.send(json.dumps(unsubscribe_message_price)),
                     timeout=5.0
                 )
-                logger.info("체결가 구독 해제 요청 전송")
-                
+                logger.info(f"체결가 구독 해제 요청 전송 ({self.price_tr_id})")
+
                 # 2. 호가 구독 해제
                 unsubscribe_message_asking = {
                     "header": {
@@ -814,7 +873,7 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0STASP0",  # 호가 구독 해제
+                            "tr_id": self.asking_tr_id,
                             "tr_key": ",".join(self.stocks),
                         }
                     }
@@ -823,7 +882,7 @@ class PriceWebSocketClient:
                     self._websocket.send(json.dumps(unsubscribe_message_asking)),
                     timeout=5.0
                 )
-                logger.info("호가 구독 해제 요청 전송")
+                logger.info(f"호가 구독 해제 요청 전송 ({self.asking_tr_id})")
                 
                 await asyncio.sleep(0.5)  # 해제 메시지 전송 대기
             except Exception as e:
@@ -838,9 +897,10 @@ class PriceWebSocketClient:
             self._websocket = None
 
         # Redis에서 연결 정보 삭제
-        self._redis_manager.delete_price_connection()
+        self._redis_manager.delete_price_connection(exchange_type=self.exchange_type)
 
-        await send_slack(f"[KIS WebSocket] 종목 구독 종료 - 총 {len(self.stocks)}개 종목")
+        exchange_label = f" ({self.exchange_type})" if self.exchange_type else ""
+        await send_slack(f"[KIS WebSocket] 종목 구독 종료{exchange_label} - 총 {len(self.stocks)}개 종목")
 
     @property
     def is_connected(self) -> bool:
@@ -859,7 +919,7 @@ class PriceWebSocketClient:
         try:
             # 각 종목별로 개별 해제 (한 번에 여러 종목 해제가 안 될 수 있음)
             for stock in stocks:
-                # 1. 체결가 구독 해제 (H0STCNT0)
+                # 1. 체결가 구독 해제
                 unsubscribe_message_price = {
                     "header": {
                         "approval_key": self.ws_token,
@@ -869,8 +929,8 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0STCNT0",  # 체결가 구독 해제
-                            "tr_key": stock,  # 단일 종목코드
+                            "tr_id": self.price_tr_id,
+                            "tr_key": stock,
                         }
                     }
                 }
@@ -879,9 +939,9 @@ class PriceWebSocketClient:
                     self._websocket.send(json.dumps(unsubscribe_message_price)),
                     timeout=5.0
                 )
-                logger.debug(f"체결가 구독 해제 요청 전송: {stock}")
+                logger.debug(f"체결가 구독 해제 요청 전송 ({self.price_tr_id}): {stock}")
 
-                # 2. 호가 구독 해제 (H0STASP0)
+                # 2. 호가 구독 해제
                 unsubscribe_message_asking = {
                     "header": {
                         "approval_key": self.ws_token,
@@ -891,8 +951,8 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0STASP0",  # 호가 구독 해제
-                            "tr_key": stock,  # 단일 종목코드
+                            "tr_id": self.asking_tr_id,
+                            "tr_key": stock,
                         }
                     }
                 }
@@ -901,7 +961,7 @@ class PriceWebSocketClient:
                     self._websocket.send(json.dumps(unsubscribe_message_asking)),
                     timeout=5.0
                 )
-                logger.debug(f"호가 구독 해제 요청 전송: {stock}")
+                logger.debug(f"호가 구독 해제 요청 전송 ({self.asking_tr_id}): {stock}")
                 
                 # 각 종목 해제 요청 사이에 약간의 지연 (서버 처리 시간 확보)
                 await asyncio.sleep(0.1)
@@ -935,7 +995,7 @@ class PriceWebSocketClient:
         try:
             # 각 종목별로 개별 구독 (한 번에 여러 종목 구독이 안 될 수 있음)
             for stock in stocks:
-                # 1. 체결가 구독 (H0STCNT0)
+                # 1. 체결가 구독
                 subscribe_message_price = {
                     "header": {
                         "approval_key": self.ws_token,
@@ -945,8 +1005,8 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0STCNT0",  # 체결가 구독
-                            "tr_key": stock,  # 단일 종목코드
+                            "tr_id": self.price_tr_id,
+                            "tr_key": stock,
                         }
                     }
                 }
@@ -955,9 +1015,9 @@ class PriceWebSocketClient:
                     self._websocket.send(json.dumps(subscribe_message_price)),
                     timeout=5.0
                 )
-                logger.debug(f"체결가 구독 요청 전송: {stock}")
+                logger.debug(f"체결가 구독 요청 전송 ({self.price_tr_id}): {stock}")
 
-                # 2. 호가 구독 (H0STASP0)
+                # 2. 호가 구독
                 subscribe_message_asking = {
                     "header": {
                         "approval_key": self.ws_token,
@@ -967,8 +1027,8 @@ class PriceWebSocketClient:
                     },
                     "body": {
                         "input": {
-                            "tr_id": "H0STASP0",  # 호가 구독
-                            "tr_key": stock,  # 단일 종목코드
+                            "tr_id": self.asking_tr_id,
+                            "tr_key": stock,
                         }
                     }
                 }
@@ -977,7 +1037,7 @@ class PriceWebSocketClient:
                     self._websocket.send(json.dumps(subscribe_message_asking)),
                     timeout=5.0
                 )
-                logger.debug(f"호가 구독 요청 전송: {stock}")
+                logger.debug(f"호가 구독 요청 전송 ({self.asking_tr_id}): {stock}")
                 
                 # 각 종목 구독 요청 사이에 약간의 지연 (서버 처리 시간 확보)
                 await asyncio.sleep(0.1)

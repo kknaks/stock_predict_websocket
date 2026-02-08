@@ -51,6 +51,7 @@ class TargetPrice:
     weight: float  # 비중 (0.0 ~ 1.0)
     target_quantity: int  # 목표 구매 수량 (비중 기반 계산)
     created_at: datetime  # 생성 시간
+    exchange_type: Optional[str] = None  # 거래소 타입 (NXT, KRX)
 
 
 class StrategyTable:
@@ -111,7 +112,8 @@ class StrategyTable:
         self,
         prediction: PredictionItem,
         strategy_config: StrategyConfig,
-        weight: float
+        weight: float,
+        exchange_type: Optional[str] = None,
     ) -> Optional[TargetPrice]:
         """
         예측 데이터로부터 목표가, 매도가, 손절가 계산
@@ -120,6 +122,7 @@ class StrategyTable:
             prediction: 예측 데이터
             strategy_config: 전략 설정 정보
             weight: 비중 (0.0 ~ 1.0)
+            exchange_type: 거래소 타입 (NXT, KRX)
 
         Returns:
             TargetPrice: 계산된 목표가 정보
@@ -166,7 +169,8 @@ class StrategyTable:
             signal=prediction.signal,
             weight=weight,
             target_quantity=target_quantity,
-            created_at=prediction.timestamp
+            created_at=prediction.timestamp,
+            exchange_type=exchange_type,
         )
 
     def _update_target(
@@ -206,8 +210,10 @@ class StrategyTable:
             "signal": target_price.signal,
             "weight": target_price.weight,
             "target_quantity": target_price.target_quantity,
-            "created_at": target_price.created_at.isoformat() if isinstance(target_price.created_at, datetime) else str(target_price.created_at)
+            "created_at": target_price.created_at.isoformat() if isinstance(target_price.created_at, datetime) else str(target_price.created_at),
         }
+        if target_price.exchange_type:
+            target_data["exchange_type"] = target_price.exchange_type
         self._redis_manager.save_strategy_target(
             user_strategy_id, 
             target_price.stock_code, 
@@ -270,9 +276,10 @@ class StrategyTable:
                             take_profit_target=float(data["take_profit_target"]),
                             prob_up=float(data["prob_up"]),
                             signal=data["signal"],
-                            weight=float(data.get("weight", 0.0)),  # 기존 데이터 호환성
-                            target_quantity=int(data.get("target_quantity", 1)),  # 기존 데이터 호환성
-                            created_at=datetime.fromisoformat(data["created_at"]) if isinstance(data["created_at"], str) else data["created_at"]
+                            weight=float(data.get("weight", 0.0)),
+                            target_quantity=int(data.get("target_quantity", 1)),
+                            created_at=datetime.fromisoformat(data["created_at"]) if isinstance(data["created_at"], str) else data["created_at"],
+                            exchange_type=data.get("exchange_type"),
                         )
                     except Exception as e:
                         logger.warning(f"Failed to convert Redis data to TargetPrice for {code}: {e}")
@@ -295,9 +302,10 @@ class StrategyTable:
                         take_profit_target=float(redis_data["take_profit_target"]),
                         prob_up=float(redis_data["prob_up"]),
                         signal=redis_data["signal"],
-                        weight=float(redis_data.get("weight", 0.0)),  # 기존 데이터 호환성
-                        target_quantity=int(redis_data.get("target_quantity", 1)),  # 기존 데이터 호환성
-                        created_at=datetime.fromisoformat(redis_data["created_at"]) if isinstance(redis_data["created_at"], str) else redis_data["created_at"]
+                        weight=float(redis_data.get("weight", 0.0)),
+                        target_quantity=int(redis_data.get("target_quantity", 1)),
+                        created_at=datetime.fromisoformat(redis_data["created_at"]) if isinstance(redis_data["created_at"], str) else redis_data["created_at"],
+                        exchange_type=redis_data.get("exchange_type"),
                     )
                 except Exception as e:
                     logger.warning(f"Failed to convert Redis data to TargetPrice for {stock_code}: {e}")
@@ -400,16 +408,19 @@ class StrategyTable:
             f"{success_count}/{len(strategies)} strategies initialized successfully"
         )
 
-    async def process_predictions(self, predictions: List[PredictionItem]) -> None:
+    async def process_predictions(
+        self, predictions: List[PredictionItem], exchange_type: Optional[str] = None
+    ) -> None:
         """
         예측 데이터 처리 및 목표가 계산
-        
+
         예측 데이터 처리 완료 후 카프카로 daily_strategy 토픽에 전략 정보를 발행합니다.
-        
+
         총 투자 금액보다 시가가 높은 종목은 자동으로 제외됩니다.
 
         Args:
             predictions: 예측 데이터 리스트
+            exchange_type: 거래소 타입 (NXT, KRX)
         """
         # 각 전략별로 구매 가능한 종목만 필터링 (총 투자 금액보다 시가가 낮은 종목만)
         strategy_available_predictions = {}
@@ -494,7 +505,7 @@ class StrategyTable:
                         weight = 1.0 / len(available_predictions)
                     
                     # 목표가 계산
-                    target_price = self._calculate_target(prediction, strategy_config, weight)
+                    target_price = self._calculate_target(prediction, strategy_config, weight, exchange_type=exchange_type)
 
                     # 수량 0으로 구매 불가한 종목은 제외
                     if target_price is None:
@@ -600,9 +611,10 @@ class StrategyTable:
                         take_profit_target=float(redis_data["take_profit_target"]),
                         prob_up=float(redis_data["prob_up"]),
                         signal=redis_data["signal"],
-                        weight=float(redis_data.get("weight", 0.0)),  # 기존 데이터 호환성
-                        target_quantity=int(redis_data.get("target_quantity", 1)),  # 기존 데이터 호환성
-                        created_at=datetime.fromisoformat(redis_data["created_at"]) if isinstance(redis_data["created_at"], str) else redis_data["created_at"]
+                        weight=float(redis_data.get("weight", 0.0)),
+                        target_quantity=int(redis_data.get("target_quantity", 1)),
+                        created_at=datetime.fromisoformat(redis_data["created_at"]) if isinstance(redis_data["created_at"], str) else redis_data["created_at"],
+                        exchange_type=redis_data.get("exchange_type"),
                     )
                     # 메모리 캐시도 업데이트 (다음 조회 시 빠르게)
                     if user_strategy_id not in self._target_tables:
@@ -655,6 +667,22 @@ class StrategyTable:
             "stop_loss_price": target.stop_loss_price,
             "current_price": current_price
         }
+
+    def get_stocks_by_exchange_type(self, exchange_type: str) -> List[str]:
+        """특정 exchange_type의 종목 코드 목록 조회
+
+        Args:
+            exchange_type: 거래소 타입 (NXT, KRX)
+
+        Returns:
+            종목 코드 리스트
+        """
+        stocks = set()
+        for targets in self._target_tables.values():
+            for stock_code, target in targets.items():
+                if target.exchange_type and target.exchange_type.upper() == exchange_type.upper():
+                    stocks.add(stock_code)
+        return list(stocks)
 
     def get_all_strategies(self) -> List[int]:
         """

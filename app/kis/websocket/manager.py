@@ -42,7 +42,7 @@ class WebSocketManager:
 
     def __init__(self):
         self._status = WebSocketStatus.IDLE
-        self._price_client: Optional[PriceWebSocketClient] = None
+        self._price_clients: Dict[str, PriceWebSocketClient] = {}  # {"NXT": ..., "KRX": ..., "DEFAULT": ...}
         self._account_clients: Dict[str, AccountWebSocketClient] = {}
         self._tasks: List[asyncio.Task] = []
         self._error_stats = get_error_stats()
@@ -92,9 +92,11 @@ class WebSocketManager:
 
             # 가격 웹소켓 시작 (PRICE 타겟일 때만)
             if command.target in ("ALL", "PRICE"):
+                client_key = self._get_client_key(command.exchange_type)
+                existing_client = self._price_clients.get(client_key)
                 # 이미 실행 중이면 스킵
-                if self._price_client and self._price_client.is_connected:
-                    logger.info("Price websocket is already running, skipping")
+                if existing_client and existing_client.is_connected:
+                    logger.info(f"Price websocket ({client_key}) is already running, skipping")
                 elif not tokens:
                     logger.error("tokens is required for PRICE target")
                     if self._status == WebSocketStatus.STARTING:
@@ -102,7 +104,7 @@ class WebSocketManager:
                     return False
                 elif config.stocks:
                     try:
-                        await self._start_price_websocket(tokens, config)
+                        await self._start_price_websocket(tokens, config, exchange_type=command.exchange_type)
                         price_websocket_started = True
                     except WebSocketAuthError as e:
                         logger.error(f"Price websocket auth error: {e}")
@@ -148,7 +150,7 @@ class WebSocketManager:
             # 2. 계좌 웹소켓이 시작되었거나 (새로 추가되었거나, mock은 개별 스킵)
             success = False
             if command.target in ("ALL", "PRICE"):
-                if price_websocket_started or (self._price_client and self._price_client.is_connected):
+                if price_websocket_started or self.has_running_price_clients():
                     success = True
             if command.target in ("ALL", "ACCOUNT"):
                 if new_accounts_added > 0 or mock_accounts_skipped > 0 or len(self._account_clients) > 0:
@@ -214,8 +216,9 @@ class WebSocketManager:
 
             # 가격 웹소켓 종료
             if target in ("ALL", "PRICE"):
+                exchange_type = command.exchange_type if command else None
                 try:
-                    await self._stop_price_websocket()
+                    await self._stop_price_websocket(exchange_type)
                 except Exception as e:
                     logger.error(f"Error stopping price websocket: {e}", exc_info=True)
                     self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "price"})
@@ -264,45 +267,56 @@ class WebSocketManager:
             self._status = WebSocketStatus.ERROR
             return False
 
-    async def _start_price_websocket(self, tokens: TokenInfo, config: StartConfig) -> None:
-        """가격 웹소켓 시작"""
+    async def _start_price_websocket(
+        self, tokens: TokenInfo, config: StartConfig, exchange_type: Optional[str] = None
+    ) -> None:
+        """가격 웹소켓 시작
+
+        Args:
+            tokens: KIS 토큰 정보
+            config: 설정 정보
+            exchange_type: 거래소 타입 (NXT, KRX)
+        """
+        client_key = self._get_client_key(exchange_type)
         try:
             # Redis에서 기존 연결 정보 확인
-            existing_connection = self._redis_manager.get_price_connection()
+            existing_connection = self._redis_manager.get_price_connection(exchange_type)
             if existing_connection:
                 existing_appkey = existing_connection.get("appkey")
                 existing_status = existing_connection.get("status", "unknown")
-                
+
                 # 같은 appkey가 이미 사용 중이면 에러 발생
                 if existing_appkey == config.appkey and existing_status == "connected":
                     error_msg = (
-                        f"Price websocket already in use with appkey: {config.appkey}. "
+                        f"Price websocket ({client_key}) already in use with appkey: {config.appkey}. "
                         f"Please stop existing connection first."
                     )
                     logger.error(error_msg)
                     raise WebSocketConnectionError(
                         error_msg,
-                        details={"appkey": config.appkey, "existing_status": existing_status}
+                        details={"appkey": config.appkey, "existing_status": existing_status, "exchange_type": exchange_type}
                     )
                 elif existing_appkey == config.appkey:
                     # 연결이 끊어진 상태면 Redis에서 삭제하고 계속 진행
                     logger.warning(
-                        f"Found disconnected connection for appkey {config.appkey}, "
+                        f"Found disconnected connection for appkey {config.appkey} ({client_key}), "
                         f"cleaning up Redis entry"
                     )
-                    self._redis_manager.delete_price_connection()
-            
-            logger.info(f"Starting price websocket for {len(config.stocks)} stocks")
-            self._price_client = PriceWebSocketClient(
+                    self._redis_manager.delete_price_connection(exchange_type)
+
+            logger.info(f"Starting price websocket ({client_key}) for {len(config.stocks)} stocks")
+            price_client = PriceWebSocketClient(
                 ws_token=tokens.ws_token,
                 appkey=config.appkey,
                 env_dv=config.env_dv,
                 stocks=config.stocks,
+                exchange_type=exchange_type,
             )
+            self._price_clients[client_key] = price_client
 
-            task = asyncio.create_task(self._price_client.connect_and_run())
+            task = asyncio.create_task(price_client.connect_and_run())
             self._tasks.append(task)
-            logger.info("Price websocket started")
+            logger.info(f"Price websocket ({client_key}) started")
 
         except WebSocketAuthError:
             # 인증 에러는 그대로 전파 (전체 실패 처리)
@@ -592,19 +606,41 @@ class WebSocketManager:
         except Exception as e:
             logger.warning(f"Error stopping daily strategy producer: {e}")
 
-    async def _stop_price_websocket(self) -> None:
-        """가격 웹소켓 종료"""
-        if self._price_client:
-            try:
-                await self._price_client.disconnect()
-                logger.info("Price websocket stopped")
-            except Exception as e:
-                logger.error(f"Error stopping price websocket: {e}", exc_info=True)
-            finally:
-                self._price_client = None
-        
-        # Redis에서 연결 정보 삭제 (항상 실행 - _price_client가 None이어도 Redis에 정보가 남아있을 수 있음)
-        self._redis_manager.delete_price_connection()
+    async def _stop_price_websocket(self, exchange_type: Optional[str] = None) -> None:
+        """가격 웹소켓 종료
+
+        Args:
+            exchange_type: 거래소 타입 (NXT, KRX). None이면 전체 종료.
+        """
+        if exchange_type is not None:
+            # 특정 exchange_type만 종료
+            client_key = self._get_client_key(exchange_type)
+            client = self._price_clients.get(client_key)
+            if client:
+                try:
+                    await client.disconnect()
+                    logger.info(f"Price websocket ({client_key}) stopped")
+                except Exception as e:
+                    logger.error(f"Error stopping price websocket ({client_key}): {e}", exc_info=True)
+                finally:
+                    del self._price_clients[client_key]
+
+            # Redis에서 연결 정보 삭제
+            self._redis_manager.delete_price_connection(exchange_type)
+        else:
+            # 전체 종료
+            for client_key in list(self._price_clients.keys()):
+                client = self._price_clients[client_key]
+                try:
+                    await client.disconnect()
+                    logger.info(f"Price websocket ({client_key}) stopped")
+                except Exception as e:
+                    logger.error(f"Error stopping price websocket ({client_key}): {e}", exc_info=True)
+
+            self._price_clients.clear()
+
+            # Redis에서 모든 가격 연결 정보 삭제
+            self._redis_manager.delete_all_price_connections()
 
     async def _stop_account_websockets(self, target: str) -> None:
         """계좌 웹소켓들 종료"""
@@ -635,98 +671,128 @@ class WebSocketManager:
                 self._redis_manager.delete_account_connection(account_no)
                 logger.info(f"Cleaned up orphaned Redis account connection: {account_no}")
 
-    async def update_price_stocks(self, new_stocks: List[str]) -> bool:
+    async def update_price_stocks(self, new_stocks: List[str], exchange_type: Optional[str] = None) -> bool:
         """
         가격 웹소켓 종목 업데이트
-        
+
         Args:
             new_stocks: 새로운 종목 리스트
-            
+            exchange_type: 거래소 타입 (NXT, KRX)
+
         Returns:
             성공 여부
         """
-        if not self._price_client:
-            logger.warning("Price websocket is not running, cannot update stocks")
-            return False
-        
-        if not self._price_client.is_connected:
-            logger.warning("Price websocket is not connected, cannot update stocks")
-            return False
-        
-        try:
-            await self._price_client.update_stocks(new_stocks)
-            logger.info(f"Price websocket stocks updated: {len(new_stocks)} stocks")
-            
-            # Redis에 업데이트된 종목 정보 저장
-            if self._price_client.stocks:
-                self._redis_manager.save_price_connection(
-                    ws_token=self._price_client.ws_token,
-                    appkey=self._price_client.appkey,
-                    env_dv=self._price_client.env_dv,
-                    stocks=self._price_client.stocks,
-                    status="connected",
-                    reconnect_attempts=self._price_client.reconnect_attempts,
-                )
-            
-            return True
-        except Exception as e:
-            logger.error(f"Failed to update price websocket stocks: {e}", exc_info=True)
-            self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "price"})
+        client_key = self._get_client_key(exchange_type)
+        price_client = self._price_clients.get(client_key)
+
+        if not price_client:
+            logger.warning(f"Price websocket ({client_key}) is not running, cannot update stocks")
             return False
 
-    async def add_price_stocks(self, new_stocks: List[str]) -> bool:
+        if not price_client.is_connected:
+            logger.warning(f"Price websocket ({client_key}) is not connected, cannot update stocks")
+            return False
+
+        try:
+            await price_client.update_stocks(new_stocks)
+            logger.info(f"Price websocket ({client_key}) stocks updated: {len(new_stocks)} stocks")
+
+            # Redis에 업데이트된 종목 정보 저장
+            if price_client.stocks:
+                self._redis_manager.save_price_connection(
+                    ws_token=price_client.ws_token,
+                    appkey=price_client.appkey,
+                    env_dv=price_client.env_dv,
+                    stocks=price_client.stocks,
+                    status="connected",
+                    reconnect_attempts=price_client.reconnect_attempts,
+                    exchange_type=exchange_type,
+                )
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update price websocket ({client_key}) stocks: {e}", exc_info=True)
+            self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "price", "exchange_type": exchange_type})
+            return False
+
+    async def add_price_stocks(self, new_stocks: List[str], exchange_type: Optional[str] = None) -> bool:
         """
         가격 웹소켓 종목 추가 (기존 종목 유지 + 새 종목만 추가)
 
         Args:
             new_stocks: 추가할 종목 리스트
+            exchange_type: 거래소 타입 (NXT, KRX)
 
         Returns:
             성공 여부
         """
-        if not self._price_client:
-            logger.warning("Price websocket is not running, cannot add stocks")
+        client_key = self._get_client_key(exchange_type)
+        price_client = self._price_clients.get(client_key)
+
+        if not price_client:
+            logger.warning(f"Price websocket ({client_key}) is not running, cannot add stocks")
             return False
 
-        if not self._price_client.is_connected:
-            logger.warning("Price websocket is not connected, cannot add stocks")
+        if not price_client.is_connected:
+            logger.warning(f"Price websocket ({client_key}) is not connected, cannot add stocks")
             return False
 
         try:
-            await self._price_client.add_stocks(new_stocks)
-            logger.info(f"Price websocket stocks added: {len(new_stocks)} new stocks requested")
+            await price_client.add_stocks(new_stocks)
+            logger.info(f"Price websocket ({client_key}) stocks added: {len(new_stocks)} new stocks requested")
 
             # Redis에 업데이트된 종목 정보 저장
-            if self._price_client.stocks:
+            if price_client.stocks:
                 self._redis_manager.save_price_connection(
-                    ws_token=self._price_client.ws_token,
-                    appkey=self._price_client.appkey,
-                    env_dv=self._price_client.env_dv,
-                    stocks=self._price_client.stocks,
+                    ws_token=price_client.ws_token,
+                    appkey=price_client.appkey,
+                    env_dv=price_client.env_dv,
+                    stocks=price_client.stocks,
                     status="connected",
-                    reconnect_attempts=self._price_client.reconnect_attempts,
+                    reconnect_attempts=price_client.reconnect_attempts,
+                    exchange_type=exchange_type,
                 )
 
             return True
         except Exception as e:
-            logger.error(f"Failed to add price websocket stocks: {e}", exc_info=True)
-            self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "price"})
+            logger.error(f"Failed to add price websocket ({client_key}) stocks: {e}", exc_info=True)
+            self._error_stats.record_error(e, error_type=None, error_code=None, details={"websocket_type": "price", "exchange_type": exchange_type})
             return False
+
+    @staticmethod
+    def _get_client_key(exchange_type: Optional[str]) -> str:
+        """exchange_type으로부터 price_clients 딕셔너리 키 생성"""
+        return exchange_type.upper() if exchange_type else "DEFAULT"
+
+    def has_running_price_clients(self) -> bool:
+        """실행 중인 가격 웹소켓 클라이언트가 있는지 확인"""
+        return any(client.is_connected for client in self._price_clients.values())
+
+    def get_price_client_stocks(self, exchange_type: str) -> List[str]:
+        """특정 exchange_type의 price client가 구독 중인 종목 조회"""
+        client_key = self._get_client_key(exchange_type)
+        client = self._price_clients.get(client_key)
+        if client:
+            return list(client.stocks)
+        return []
 
     def get_status(self) -> Dict:
         """상태 정보 반환"""
-        # 가격 웹소켓 상태
-        price_status = "stopped"
-        price_redis_info = None
-        if self._price_client:
-            price_status = "connected" if self._price_client.is_connected else "disconnected"
-            if self._price_client.reconnect_attempts > 0:
-                price_status = f"{price_status} (reconnecting: {self._price_client.reconnect_attempts})"
-        else:
-            # Redis에서 확인
-            price_redis_info = self._redis_manager.get_price_connection()
-            if price_redis_info:
-                price_status = f"redis_found ({price_redis_info.get('status', 'unknown')})"
+        # 가격 웹소켓 상태 (exchange_type별)
+        price_statuses = {}
+        price_redis_info = {}
+        for client_key, client in self._price_clients.items():
+            status = "connected" if client.is_connected else "disconnected"
+            if client.reconnect_attempts > 0:
+                status = f"{status} (reconnecting: {client.reconnect_attempts})"
+            price_statuses[client_key] = status
+
+        # Redis에서 추가 가격 연결 정보 확인
+        all_redis_price = self._redis_manager.get_all_price_connections()
+        for exchange, redis_data in all_redis_price.items():
+            if exchange not in price_statuses:
+                price_statuses[exchange] = f"redis_found ({redis_data.get('status', 'unknown')})"
+                price_redis_info[exchange] = redis_data
 
         # 계좌 웹소켓 상태
         account_statuses = {}
@@ -746,7 +812,7 @@ class WebSocketManager:
 
         return {
             "status": self._status.value,
-            "price_websocket": price_status,
+            "price_websockets": price_statuses,
             "price_redis_info": price_redis_info,
             "account_websockets": account_statuses,
             "account_redis_info": account_redis_info,

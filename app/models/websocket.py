@@ -78,6 +78,7 @@ class StartCommand(BaseModel):
     target: str = Field(default="ALL", description="대상 (ALL, PRICE, ACCOUNT, account_no)")
     tokens: Optional[TokenInfo] = Field(default=None, description="KIS 토큰 정보 (PRICE 타겟용)")
     config: StartConfig = Field(..., description="설정 정보")
+    exchange_type: Optional[str] = Field(default=None, description="거래소 타입 (NXT, KRX)")
 
 class ClosingCommand(BaseModel):
     """CLOSING 명령 메시지"""
@@ -85,6 +86,7 @@ class ClosingCommand(BaseModel):
     command: Literal["CLOSING"] = Field(..., description="명령 타입")
     timestamp: datetime = Field(..., description="명령 시간")
     target: str = Field(default="ALL", description="대상 (ALL, PRICE, ACCOUNT, account_no)")
+    exchange_type: Optional[str] = Field(default=None, description="거래소 타입 (NXT, KRX)")
 
 
 class StopCommand(BaseModel):
@@ -93,6 +95,7 @@ class StopCommand(BaseModel):
     command: Literal["STOP"] = Field(..., description="명령 타입")
     timestamp: datetime = Field(..., description="명령 시간")
     target: str = Field(default="ALL", description="대상 (ALL, PRICE, ACCOUNT, account_no)")
+    exchange_type: Optional[str] = Field(default=None, description="거래소 타입 (NXT, KRX)")
 
 
 class WebSocketCommand(BaseModel):
@@ -103,6 +106,7 @@ class WebSocketCommand(BaseModel):
     target: str = Field(default="ALL", description="대상")
     tokens: Optional[TokenInfo] = Field(default=None, description="KIS 토큰 정보 (START 명령에만 필요)")
     config: Optional[Dict[str, Any]] = Field(default=None, description="설정 정보 (START 명령에만 필요)")
+    exchange_type: Optional[str] = Field(default=None, description="거래소 타입 (NXT, KRX)")
 
     def to_start_command(self) -> StartCommand:
         """START 명령으로 변환"""
@@ -121,6 +125,7 @@ class WebSocketCommand(BaseModel):
             target=self.target,
             tokens=self.tokens,
             config=StartConfig(**self.config),
+            exchange_type=self.exchange_type,
         )
 
     def to_stop_command(self) -> StopCommand:
@@ -132,6 +137,7 @@ class WebSocketCommand(BaseModel):
             command="STOP",
             timestamp=self.timestamp,
             target=self.target,
+            exchange_type=self.exchange_type,
         )
 
     def to_closing_command(self) -> ClosingCommand:
@@ -143,4 +149,5 @@ class WebSocketCommand(BaseModel):
             command="CLOSING",
             timestamp=self.timestamp,
             target=self.target,
+            exchange_type=self.exchange_type,
         )

@@ -5,7 +5,7 @@ Kafka에서 받은 웹소켓 메시지를 처리
 """
 
 import logging
-from typing import Optional
+from typing import Optional, List
 
 from app.models.websocket import WebSocketCommand, StartCommand, StopCommand, ClosingCommand
 from app.kis.websocket.manager import get_websocket_manager
@@ -53,6 +53,7 @@ class WebSocketHandler:
             logger.info(
                 f"Processing START websocket message: "
                 f"target={start_command.target}, "
+                f"exchange_type={start_command.exchange_type}, "
                 f"stocks={len(start_command.config.stocks)}, "
                 f"accounts={len(start_command.config.accounts)}"
             )
@@ -158,37 +159,75 @@ class WebSocketHandler:
             raise
 
     async def _handle_close_command(self, websocket_msg: WebSocketCommand) -> None:
-        """CLOSING 웹소켓 메시지 처리 - 장 마감 시 모든 주문 마감"""
+        """CLOSING 웹소켓 메시지 처리 - 장 마감 시 주문 마감
+
+        exchange_type이 있으면 해당 거래소 종목만 마감 처리.
+        모든 price client가 종료되면 daily_strategy 삭제 및 전략 데이터 정리.
+        """
         try:
             closing_command = websocket_msg.to_closing_command()
-            logger.info(f"Processing CLOSING websocket message: target={closing_command.target}")
+            exchange_type = closing_command.exchange_type
+            logger.info(
+                f"Processing CLOSING websocket message: "
+                f"target={closing_command.target}, exchange_type={exchange_type}"
+            )
 
             # 1. 모든 전략 ID 조회
             all_strategy_ids = self._strategy_table.get_all_strategies()
             logger.info(f"전체 전략 수: {len(all_strategy_ids)}, 전략 IDs: {all_strategy_ids}")
 
-            # 2. 각 전략별 마감 처리
-            for user_strategy_id in all_strategy_ids:
-                try:
-                    # Order 기반 미체결 매수 주문 취소
-                    await self._close_active_buy_orders(user_strategy_id)
+            if exchange_type:
+                # exchange_type 기반 부분 마감
+                # 1. 해당 exchange의 price websocket 종료
+                await self._manager._stop_price_websocket(exchange_type)
 
-                    # Position 기반 미매도 종목 시장가 매도
-                    await self._close_unsold_positions(user_strategy_id)
+                # 2. 해당 exchange의 종목만 마감 처리
+                exchange_stocks = self._get_stocks_for_exchange(exchange_type)
+                logger.info(
+                    f"CLOSING {exchange_type}: 해당 종목 {len(exchange_stocks)}개 마감 처리"
+                )
 
-                except Exception as e:
-                    logger.error(
-                        f"전략별 주문 마감 처리 오류 (user_strategy_id={user_strategy_id}): {e}",
-                        exc_info=True
+                for user_strategy_id in all_strategy_ids:
+                    try:
+                        await self._close_active_buy_orders(user_strategy_id, stock_codes=exchange_stocks)
+                        await self._close_unsold_positions(user_strategy_id, stock_codes=exchange_stocks)
+                    except Exception as e:
+                        logger.error(
+                            f"전략별 주문 마감 처리 오류 (user_strategy_id={user_strategy_id}): {e}",
+                            exc_info=True
+                        )
+
+                # 3. 모든 price client가 종료되었는지 확인
+                if not self._manager.has_running_price_clients():
+                    # 마지막 마감 → daily_strategy 삭제 + 전략 데이터 정리
+                    logger.info("모든 price client 종료됨. daily_strategy 삭제 및 전략 데이터 정리")
+                    for user_strategy_id in all_strategy_ids:
+                        self._redis_manager.delete_daily_strategy(user_strategy_id)
+                    self._strategy_table.clear_all_strategies()
+                else:
+                    logger.info(
+                        f"CLOSING {exchange_type} 완료. "
+                        f"아직 실행 중인 price client 있음 - 전략 데이터 유지"
                     )
+            else:
+                # 하위호환: 기존 로직 (전체 마감)
+                for user_strategy_id in all_strategy_ids:
+                    try:
+                        await self._close_active_buy_orders(user_strategy_id)
+                        await self._close_unsold_positions(user_strategy_id)
+                    except Exception as e:
+                        logger.error(
+                            f"전략별 주문 마감 처리 오류 (user_strategy_id={user_strategy_id}): {e}",
+                            exc_info=True
+                        )
 
-            # 3. daily_strategy 데이터 삭제 (다음 날 새로 생성되도록)
-            for user_strategy_id in all_strategy_ids:
-                self._redis_manager.delete_daily_strategy(user_strategy_id)
-            logger.info(f"Deleted daily_strategy for {len(all_strategy_ids)} strategies")
+                # daily_strategy 데이터 삭제
+                for user_strategy_id in all_strategy_ids:
+                    self._redis_manager.delete_daily_strategy(user_strategy_id)
+                logger.info(f"Deleted daily_strategy for {len(all_strategy_ids)} strategies")
 
-            # 4. 메모리 및 Redis 전략 데이터 정리
-            self._strategy_table.clear_all_strategies()
+                # 메모리 및 Redis 전략 데이터 정리
+                self._strategy_table.clear_all_strategies()
 
             logger.info("CLOSING websocket message processed successfully")
 
@@ -197,8 +236,15 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"Error processing CLOSING websocket message: {e}", exc_info=True)
 
-    async def _close_active_buy_orders(self, user_strategy_id: int) -> None:
-        """Order 기반 미체결 매수 주문 취소"""
+    async def _close_active_buy_orders(
+        self, user_strategy_id: int, stock_codes: Optional[List[str]] = None
+    ) -> None:
+        """Order 기반 미체결 매수 주문 취소
+
+        Args:
+            user_strategy_id: 사용자 전략 ID
+            stock_codes: 처리할 종목 코드 리스트. None이면 전체.
+        """
         try:
             daily_strategy_id = self._redis_manager.get_daily_strategy_id(user_strategy_id)
             if not daily_strategy_id:
@@ -211,14 +257,22 @@ class WebSocketHandler:
                 logger.debug(f"전략 타겟 없음: user_strategy_id={user_strategy_id}")
                 return
 
+            # stock_codes 필터 적용
+            target_stock_codes = list(all_targets.keys())
+            if stock_codes is not None:
+                target_stock_codes = [s for s in target_stock_codes if s in stock_codes]
+
+            if not target_stock_codes:
+                return
+
             logger.info(
                 f"미체결 매수 주문 취소 처리: "
                 f"user_strategy_id={user_strategy_id}, "
                 f"daily_strategy_id={daily_strategy_id}, "
-                f"종목수={len(all_targets)}"
+                f"종목수={len(target_stock_codes)}"
             )
 
-            for stock_code in all_targets.keys():
+            for stock_code in target_stock_codes:
                 # 활성 매수 주문 조회
                 active_buy = self._redis_manager.get_active_buy_order(daily_strategy_id, stock_code)
                 if not active_buy:
@@ -267,11 +321,17 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"미체결 매수 주문 취소 처리 오류: {e}", exc_info=True)
 
-    async def _close_unsold_positions(self, user_strategy_id: int) -> None:
+    async def _close_unsold_positions(
+        self, user_strategy_id: int, stock_codes: Optional[List[str]] = None
+    ) -> None:
         """Position 기반 미매도 종목 시장가 매도
 
         Case 1: 활성 매도 주문 없음 → 새 시장가 매도 주문 생성
         Case 2: 활성 매도 주문 있음 (미체결/부분체결) → 시장가로 정정 주문
+
+        Args:
+            user_strategy_id: 사용자 전략 ID
+            stock_codes: 처리할 종목 코드 리스트. None이면 전체.
         """
         try:
             # daily_strategy_id 조회
@@ -282,6 +342,13 @@ class WebSocketHandler:
 
             # 보유 수량이 있는 모든 Position 조회
             positions_with_holdings = self._redis_manager.get_positions_with_holdings(daily_strategy_id)
+
+            # stock_codes 필터 적용
+            if stock_codes is not None:
+                positions_with_holdings = [
+                    p for p in positions_with_holdings
+                    if p.get("stock_code") in stock_codes
+                ]
 
             if not positions_with_holdings:
                 logger.info(f"미매도 Position 없음: user_strategy_id={user_strategy_id}")
@@ -399,11 +466,31 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"Position 기반 마감 처리 오류: {e}", exc_info=True)
 
+    def _get_stocks_for_exchange(self, exchange_type: str) -> List[str]:
+        """특정 exchange_type의 종목 코드 목록 조회
+
+        manager의 price client 구독 종목 + strategy_table의 해당 exchange 종목을 합산.
+        """
+        stocks = set()
+
+        # 1. manager의 price client에서 구독 중인 종목
+        client_stocks = self._manager.get_price_client_stocks(exchange_type)
+        stocks.update(client_stocks)
+
+        # 2. strategy_table에서 해당 exchange 종목
+        strategy_stocks = self._strategy_table.get_stocks_by_exchange_type(exchange_type)
+        stocks.update(strategy_stocks)
+
+        return list(stocks)
+
     async def _handle_stop_command(self, websocket_msg: WebSocketCommand) -> None:
         """STOP 웹소켓 메시지 처리"""
         try:
             stop_command = websocket_msg.to_stop_command()
-            logger.info(f"Processing STOP websocket message: target={stop_command.target}")
+            logger.info(
+                f"Processing STOP websocket message: "
+                f"target={stop_command.target}, exchange_type={stop_command.exchange_type}"
+            )
 
             success = await self._manager.stop_all(stop_command)
             if success:
