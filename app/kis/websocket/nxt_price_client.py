@@ -30,7 +30,7 @@ class NxtPriceClient(BasePriceWebSocketClient):
         "HOUR_CLS_CODE", "MRKT_TRTM_CLS_CODE", "VI_STND_PRC",
     ]
 
-    # H0NXASP0 호가 컬럼 (62개 - KRX 56개 + KMID/NMID 6개)
+    # H0NXASP0 호가 컬럼 (62개 - KRX 56개 + KMID 3개 + NMID 3개가 스펙이나, 실제 수신은 NMID 미포함 62개)
     ASKING_PRICE_COLUMNS = [
         "MKSC_SHRN_ISCD", "BSOP_HOUR", "HOUR_CLS_CODE",
         "ASKP1", "ASKP2", "ASKP3", "ASKP4", "ASKP5",
@@ -49,7 +49,6 @@ class NxtPriceClient(BasePriceWebSocketClient):
         "OVTM_TOTAL_ASKP_ICDC", "OVTM_TOTAL_BIDP_ICDC",
         "STCK_DEAL_CLS_CODE",
         "KMID_PRC", "KMID_TOTAL_RSQN", "KMID_CLS_CODE",
-        "NMID_PRC", "NMID_TOTAL_RSQN", "NMID_CLS_CODE",
     ]
 
     price_tr_id = "H0NXCNT0"
