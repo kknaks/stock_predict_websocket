@@ -609,6 +609,20 @@ class PriceWebSocketClient:
                             if not current_price or current_price == "0":
                                 continue
 
+                            # NXT 체결가 수신 확인 로그
+                            if tr_id == "H0NXCNT0":
+                                logger.info(
+                                    f"[NXT 체결가] 종목={parsed_data.get('MKSC_SHRN_ISCD')}, "
+                                    f"현재가={current_price}, "
+                                    f"시가={parsed_data.get('STCK_OPRC', '')}, "
+                                    f"고가={parsed_data.get('STCK_HGPR', '')}, "
+                                    f"저가={parsed_data.get('STCK_LWPR', '')}, "
+                                    f"체결량={parsed_data.get('CNTG_VOL', '')}, "
+                                    f"전일대비={parsed_data.get('PRDY_CTRT', '')}%, "
+                                    f"체결시간={parsed_data.get('STCK_CNTG_HOUR', '')}, "
+                                    f"시가시간={parsed_data.get('OPRC_HOUR', '')}"
+                                )
+
                             await self._save_price_to_redis(parsed_data)
                             await self._signal_executor.check_and_generate_buy_signal(parsed_data)
                             await self._signal_executor.check_and_generate_sell_signal(parsed_data)
@@ -644,6 +658,19 @@ class PriceWebSocketClient:
 
                         for _, row in df.iterrows():
                             parsed_data = row.dropna().to_dict()
+
+                            # NXT 호가 수신 확인 로그
+                            if tr_id == "H0NXASP0":
+                                logger.info(
+                                    f"[NXT 호가] 종목={parsed_data.get('MKSC_SHRN_ISCD')}, "
+                                    f"매도1={parsed_data.get('ASKP1', '')}, "
+                                    f"매수1={parsed_data.get('BIDP1', '')}, "
+                                    f"매도잔량1={parsed_data.get('ASKP_RSQN1', '')}, "
+                                    f"매수잔량1={parsed_data.get('BIDP_RSQN1', '')}, "
+                                    f"총매도잔량={parsed_data.get('TOTAL_ASKP_RSQN', '')}, "
+                                    f"총매수잔량={parsed_data.get('TOTAL_BIDP_RSQN', '')}, "
+                                    f"시간={parsed_data.get('BSOP_HOUR', '')}"
+                                )
 
                             await self._save_asking_price_to_redis(parsed_data)
                             await self._send_asking_price_to_kafka(parsed_data)

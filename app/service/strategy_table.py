@@ -32,6 +32,7 @@ class StrategyConfig:
     ls_ratio: float  # 손절 비율 (%)
     tp_ratio: float  # 익절 비율 (%)
     total_investment: float = 0.0  # 총 투자 금액 (비중 기반 수량 계산용)
+    nxt_ratio: float = 0.5  # NXT 투자 비율 (0.0~1.0, 나머지가 KRX 비율). websocket_command에서 전략별 설정 가능
 
 
 @dataclass
@@ -97,6 +98,7 @@ class StrategyTable:
             "ls_ratio": strategy_config.ls_ratio,
             "tp_ratio": strategy_config.tp_ratio,
             "total_investment": strategy_config.total_investment,
+            "nxt_ratio": strategy_config.nxt_ratio,
         }
         self._redis_manager.save_strategy_config(user_strategy_id, config_data)
         
@@ -108,12 +110,44 @@ class StrategyTable:
             f"tp_ratio={strategy_config.tp_ratio}"
         )
 
+    def _get_available_investment(
+        self,
+        strategy_config: StrategyConfig,
+        exchange_type: Optional[str] = None,
+    ) -> float:
+        """
+        exchange_type에 따라 사용 가능한 투자금액 계산
+
+        NXT/KRX 비율(nxt_ratio)에 따라 총 투자금을 분배합니다.
+        나중에 websocket_command에서 전략별 nxt_ratio를 내려줄 수 있도록 설계.
+
+        Args:
+            strategy_config: 전략 설정 정보
+            exchange_type: 거래소 타입 (NXT, KRX, None)
+
+        Returns:
+            해당 거래소에 배분된 투자금액
+        """
+        total = strategy_config.total_investment
+        if total <= 0:
+            return 0.0
+
+        if exchange_type is None:
+            return total
+
+        nxt_ratio = strategy_config.nxt_ratio
+        if exchange_type.upper() == "NXT":
+            return total * nxt_ratio
+        else:  # KRX or others
+            return total * (1.0 - nxt_ratio)
+
     def _calculate_target(
         self,
         prediction: PredictionItem,
         strategy_config: StrategyConfig,
         weight: float,
         exchange_type: Optional[str] = None,
+        available_investment: Optional[float] = None,
     ) -> Optional[TargetPrice]:
         """
         예측 데이터로부터 목표가, 매도가, 손절가 계산
@@ -123,6 +157,7 @@ class StrategyTable:
             strategy_config: 전략 설정 정보
             weight: 비중 (0.0 ~ 1.0)
             exchange_type: 거래소 타입 (NXT, KRX)
+            available_investment: 해당 거래소에 배분된 투자금액 (None이면 total_investment 사용)
 
         Returns:
             TargetPrice: 계산된 목표가 정보
@@ -144,9 +179,10 @@ class StrategyTable:
         stop_loss_price = stock_open * (1 + return_if_down * ls_ratio / 100)
 
         # 비중 기반 목표 구매 수량 계산
-        # 수량 = (총 투자 금액 * 비중) / 시가
-        if strategy_config.total_investment > 0 and stock_open > 0:
-            target_quantity = int((strategy_config.total_investment * weight) / stock_open)
+        # 수량 = (배분된 투자금액 * 비중) / 시가
+        investment = available_investment if available_investment is not None else strategy_config.total_investment
+        if investment > 0 and stock_open > 0:
+            target_quantity = int((investment * weight) / stock_open)
             # 수량이 0이면 구매 불가 → None 반환하여 제외
             if target_quantity == 0:
                 return None
@@ -393,7 +429,8 @@ class StrategyTable:
                     strategy_weight_type=strategy_data.get("strategy_weight_type", "equal"),
                     ls_ratio=float(strategy_data["ls_ratio"]),
                     tp_ratio=float(strategy_data["tp_ratio"]),
-                    total_investment=float(strategy_data.get("total_investment", 0.0))
+                    total_investment=float(strategy_data.get("total_investment", 0.0)),
+                    nxt_ratio=float(strategy_data.get("nxt_ratio", 0.5)),
                 )
                 self._create_target_table(strategy_config)
                 success_count += 1
@@ -422,39 +459,49 @@ class StrategyTable:
             predictions: 예측 데이터 리스트
             exchange_type: 거래소 타입 (NXT, KRX)
         """
-        # 각 전략별로 구매 가능한 종목만 필터링 (총 투자 금액보다 시가가 낮은 종목만)
+        # 각 전략별로 거래소 배분 투자금 계산 및 구매 가능 종목 필터링
         strategy_available_predictions = {}
+        strategy_available_investments = {}
         for user_strategy_id, strategy_config in self._strategy_configs.items():
-            if strategy_config.total_investment > 0:
-                # 총 투자 금액이 설정된 경우, 구매 가능한 종목만 필터링
+            # exchange_type에 따라 배분된 투자금 계산 (NXT/KRX 비율 적용)
+            available_investment = self._get_available_investment(strategy_config, exchange_type)
+            strategy_available_investments[user_strategy_id] = available_investment
+
+            if available_investment > 0:
+                # 배분된 투자금 기준으로 구매 가능한 종목만 필터링
                 available = [
-                    p for p in predictions 
-                    if float(p.stock_open) <= strategy_config.total_investment
+                    p for p in predictions
+                    if float(p.stock_open) <= available_investment
                 ]
                 if len(available) < len(predictions):
                     excluded_count = len(predictions) - len(available)
                     excluded_stocks = [
-                        p.stock_code for p in predictions 
-                        if float(p.stock_open) > strategy_config.total_investment
+                        p.stock_code for p in predictions
+                        if float(p.stock_open) > available_investment
                     ]
+                    exchange_label = exchange_type or "ALL"
                     logger.warning(
-                        f"전략 {user_strategy_id}에서 구매 불가능한 종목 {excluded_count}개 제외: "
+                        f"전략 {user_strategy_id}({exchange_label})에서 구매 불가능한 종목 {excluded_count}개 제외: "
                         f"종목코드={excluded_stocks[:5]}{'...' if len(excluded_stocks) > 5 else ''}, "
-                        f"총투자금액={strategy_config.total_investment:,.0f}원"
+                        f"배분투자금={available_investment:,.0f}원 "
+                        f"(총투자금={strategy_config.total_investment:,.0f}원, "
+                        f"nxt_ratio={strategy_config.nxt_ratio})"
                     )
                 strategy_available_predictions[user_strategy_id] = available
             else:
                 # 총 투자 금액이 설정되지 않은 경우 모든 종목 포함
                 strategy_available_predictions[user_strategy_id] = predictions
-        
+
         # 각 전략별로 구매 가능한 종목만 처리
         for user_strategy_id, strategy_config in self._strategy_configs.items():
             available_predictions = strategy_available_predictions[user_strategy_id]
-            
+            available_investment = strategy_available_investments[user_strategy_id]
+
             if not available_predictions:
+                exchange_label = exchange_type or "ALL"
                 logger.warning(
-                    f"전략 {user_strategy_id}에 구매 가능한 종목이 없습니다. "
-                    f"총투자금액={strategy_config.total_investment:,.0f}원"
+                    f"전략 {user_strategy_id}({exchange_label})에 구매 가능한 종목이 없습니다. "
+                    f"배분투자금={available_investment:,.0f}원"
                 )
                 continue
             
@@ -504,8 +551,12 @@ class StrategyTable:
                     else:
                         weight = 1.0 / len(available_predictions)
                     
-                    # 목표가 계산
-                    target_price = self._calculate_target(prediction, strategy_config, weight, exchange_type=exchange_type)
+                    # 목표가 계산 (배분된 투자금 기준)
+                    target_price = self._calculate_target(
+                        prediction, strategy_config, weight,
+                        exchange_type=exchange_type,
+                        available_investment=available_investment,
+                    )
 
                     # 수량 0으로 구매 불가한 종목은 제외
                     if target_price is None:
