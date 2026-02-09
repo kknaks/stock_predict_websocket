@@ -10,7 +10,9 @@ from typing import Optional, Dict, List
 from enum import Enum
 
 from app.models.websocket import StartCommand, StopCommand, TokenInfo, StartConfig
-from app.kis.websocket.price_client import PriceWebSocketClient
+from app.kis.websocket.price_client import BasePriceWebSocketClient
+from app.kis.websocket.krx_price_client import KrxPriceClient
+from app.kis.websocket.nxt_price_client import NxtPriceClient
 from app.kis.websocket.account_client import AccountWebSocketClient
 from app.kis.websocket.exceptions import (
     WebSocketConnectionError,
@@ -42,7 +44,7 @@ class WebSocketManager:
 
     def __init__(self):
         self._status = WebSocketStatus.IDLE
-        self._price_clients: Dict[str, PriceWebSocketClient] = {}  # {"NXT": ..., "KRX": ..., "DEFAULT": ...}
+        self._price_clients: Dict[str, BasePriceWebSocketClient] = {}  # {"NXT": ..., "KRX": ..., "DEFAULT": ...}
         self._account_clients: Dict[str, AccountWebSocketClient] = {}
         self._tasks: List[asyncio.Task] = []
         self._error_stats = get_error_stats()
@@ -305,13 +307,21 @@ class WebSocketManager:
                     self._redis_manager.delete_price_connection(exchange_type)
 
             logger.info(f"Starting price websocket ({client_key}) for {len(config.stocks)} stocks")
-            price_client = PriceWebSocketClient(
-                ws_token=tokens.ws_token,
-                appkey=config.appkey,
-                env_dv=config.env_dv,
-                stocks=config.stocks,
-                exchange_type=exchange_type,
-            )
+            # 팩토리: exchange_type에 따라 적절한 서브클래스 생성
+            if exchange_type and exchange_type.upper() == "NXT":
+                price_client = NxtPriceClient(
+                    ws_token=tokens.ws_token,
+                    appkey=config.appkey,
+                    env_dv=config.env_dv,
+                    stocks=config.stocks,
+                )
+            else:
+                price_client = KrxPriceClient(
+                    ws_token=tokens.ws_token,
+                    appkey=config.appkey,
+                    env_dv=config.env_dv,
+                    stocks=config.stocks,
+                )
             self._price_clients[client_key] = price_client
 
             task = asyncio.create_task(price_client.connect_and_run())

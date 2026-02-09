@@ -84,7 +84,7 @@ class PriceMessage(BaseModel):
             trade_strength=parsed_data.get("CTTR", ""),
             total_sell_trade_volume=parsed_data.get("SELN_CNTG_SMTN", ""),
             total_buy_trade_volume=parsed_data.get("SHNU_CNTG_SMTN", ""),
-            trade_type=parsed_data.get("CCLD_DVSN", ""),
+            trade_type=parsed_data.get("CCLD_DVSN") or parsed_data.get("CNTG_CLS_CODE", ""),
             buy_rate=parsed_data.get("SHNU_RATE", ""),
             volume_ratio=parsed_data.get("PRDY_VOL_VRSS_ACML_VOL_RATE", ""),
             open_time=parsed_data.get("OPRC_HOUR", ""),
