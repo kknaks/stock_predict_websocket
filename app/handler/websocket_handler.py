@@ -105,44 +105,52 @@ class WebSocketHandler:
                             all_strategies.append(strategy_with_user_id)
             
             if all_strategies:
-                try:
-                    await strategy_table.initialize_from_start_command(all_strategies)
+                # 이미 전략이 초기화된 경우 스킵 (NXT/KRX 이중화로 먼저 초기화된 경우)
+                existing_strategies = strategy_table.get_all_strategies()
+                if existing_strategies:
                     logger.info(
-                        f"Initialized strategy tables for {len(all_strategies)} strategies: "
-                        f"{[s.get('user_strategy_id') for s in all_strategies]}"
+                        f"Strategy tables already initialized: {existing_strategies}. "
+                        f"Skipping re-initialization from this START command."
                     )
+                else:
+                    try:
+                        await strategy_table.initialize_from_start_command(all_strategies)
+                        logger.info(
+                            f"Initialized strategy tables for {len(all_strategies)} strategies: "
+                            f"{[s.get('user_strategy_id') for s in all_strategies]}"
+                        )
 
-                    # daily_strategy_id 생성 및 저장
-                    for strategy in all_strategies:
-                        user_strategy_id = strategy.get("user_strategy_id")
-                        if user_strategy_id:
-                            # 기존 daily_strategy_id 확인
-                            existing_id = self._redis_manager.get_daily_strategy_id(user_strategy_id)
-                            if not existing_id:
-                                # 새 daily_strategy_id 생성
-                                daily_strategy_id = self._redis_manager.generate_daily_strategy_id()
-                                self._redis_manager.save_daily_strategy(
-                                    daily_strategy_id=daily_strategy_id,
-                                    user_strategy_id=user_strategy_id,
-                                    data={
-                                        "is_mock": strategy.get("is_mock", False),
-                                        "account_type": strategy.get("account_type", "mock"),
-                                        "user_id": strategy.get("user_id"),
-                                        "strategy_id": strategy.get("strategy_id"),
-                                    }
-                                )
-                                logger.info(
-                                    f"Created daily_strategy_id={daily_strategy_id} "
-                                    f"for user_strategy_id={user_strategy_id}"
-                                )
-                            else:
-                                logger.info(
-                                    f"Using existing daily_strategy_id={existing_id} "
-                                    f"for user_strategy_id={user_strategy_id}"
-                                )
+                        # daily_strategy_id 생성 및 저장
+                        for strategy in all_strategies:
+                            user_strategy_id = strategy.get("user_strategy_id")
+                            if user_strategy_id:
+                                # 기존 daily_strategy_id 확인
+                                existing_id = self._redis_manager.get_daily_strategy_id(user_strategy_id)
+                                if not existing_id:
+                                    # 새 daily_strategy_id 생성
+                                    daily_strategy_id = self._redis_manager.generate_daily_strategy_id()
+                                    self._redis_manager.save_daily_strategy(
+                                        daily_strategy_id=daily_strategy_id,
+                                        user_strategy_id=user_strategy_id,
+                                        data={
+                                            "is_mock": strategy.get("is_mock", False),
+                                            "account_type": strategy.get("account_type", "mock"),
+                                            "user_id": strategy.get("user_id"),
+                                            "strategy_id": strategy.get("strategy_id"),
+                                        }
+                                    )
+                                    logger.info(
+                                        f"Created daily_strategy_id={daily_strategy_id} "
+                                        f"for user_strategy_id={user_strategy_id}"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"Using existing daily_strategy_id={existing_id} "
+                                        f"for user_strategy_id={user_strategy_id}"
+                                    )
 
-                except Exception as e:
-                    logger.error(f"Error initializing strategy tables: {e}", exc_info=True)
+                    except Exception as e:
+                        logger.error(f"Error initializing strategy tables: {e}", exc_info=True)
             else:
                 logger.info("No strategies provided in START command, skipping strategy table initialization")
 
