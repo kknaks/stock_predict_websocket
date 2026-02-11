@@ -127,7 +127,7 @@ class SignalGenerator:
             elif loss_pct >= 0.5:
                 urgency = "HIGH"
             else:
-                urgency = "HIGH"
+                urgency = "MEDIUM"
 
             return SignalResult(
                 signal_type="SELL",

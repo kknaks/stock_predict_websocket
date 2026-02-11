@@ -27,11 +27,13 @@ class SignalExecutor:
         self._redis_manager = get_redis_manager()
         self._order_api = get_order_api()
 
-        # 시그널 체크 최적화
-        self._last_signal_check: Dict[str, datetime] = {}  # {종목코드: 마지막체크시간}
+        # 시그널 체크 최적화 (매수/매도 별도 관리)
+        self._last_buy_signal_check: Dict[str, datetime] = {}  # {종목코드: 마지막체크시간}
+        self._last_sell_signal_check: Dict[str, datetime] = {}  # {종목코드: 마지막체크시간}
         self._signal_check_interval = 0.5  # 같은 종목 체크 간격 (초)
         self._generated_signals: set = set()  # 이미 생성된 시그널 (전략ID_종목코드)
-        self._last_prices: Dict[str, float] = {}  # {종목코드: 마지막가격} - 가격 변동 없으면 스킵
+        self._last_buy_prices: Dict[str, float] = {}  # {종목코드: 마지막가격} - 매수용
+        self._last_sell_prices: Dict[str, float] = {}  # {종목코드: 마지막가격} - 매도용
 
     async def check_and_generate_buy_signal(self, price_data: dict) -> None:
         """
@@ -98,7 +100,7 @@ class SignalExecutor:
                         time_diff = current_time - opening_time
 
                         # 10분 초과 시 스킵
-                        if time_diff > timedelta(minutes=100):
+                        if time_diff > timedelta(minutes=10):
                             logger.debug(
                                 f"시가 매수 조건 불만족 (10분 초과): "
                                 f"종목={stock_code}, "
@@ -109,20 +111,20 @@ class SignalExecutor:
                 except Exception as e:
                     logger.warning(f"시가시간 파싱 오류: {e}, opening_hour={opening_hour}")
 
-            # 최적화 1: 가격 변동 없으면 스킵
-            last_price = self._last_prices.get(stock_code, 0)
+            # 최적화 1: 가격 변동 없으면 스킵 (매수 전용)
+            last_price = self._last_buy_prices.get(stock_code, 0)
             if current_price == last_price:
                 return
-            self._last_prices[stock_code] = current_price
+            self._last_buy_prices[stock_code] = current_price
 
-            # 최적화 2: 쓰로틀링 - 같은 종목 0.5초 내 재체크 방지
+            # 최적화 2: 쓰로틀링 - 같은 종목 0.5초 내 재체크 방지 (매수 전용)
             now = datetime.now()
-            last_check = self._last_signal_check.get(stock_code)
+            last_check = self._last_buy_signal_check.get(stock_code)
             if last_check:
                 elapsed = (now - last_check).total_seconds()
                 if elapsed < self._signal_check_interval:
                     return
-            self._last_signal_check[stock_code] = now
+            self._last_buy_signal_check[stock_code] = now
 
             # Redis에서 호가 데이터 가져오기
             asking_price_data = await self._get_asking_price_from_redis(stock_code)
@@ -178,7 +180,7 @@ class SignalExecutor:
                 if signal:
                     # BUY 시그널은 한 번만 생성 (중복 방지)
                     self._generated_signals.add(signal_key)
-                    await self.handle_signal(user_strategy_id, signal)
+                    await self.handle_signal(user_strategy_id, signal, stock_name=target.stock_name)
 
         except Exception as e:
             logger.error(f"매수 시그널 체크 오류: {e}", exc_info=True)
@@ -202,20 +204,20 @@ class SignalExecutor:
             if current_price <= 0:
                 return
 
-            # 최적화 1: 가격 변동 없으면 스킵
-            last_price = self._last_prices.get(stock_code, 0)
+            # 최적화 1: 가격 변동 없으면 스킵 (매도 전용)
+            last_price = self._last_sell_prices.get(stock_code, 0)
             if current_price == last_price:
                 return
-            self._last_prices[stock_code] = current_price
+            self._last_sell_prices[stock_code] = current_price
 
-            # 최적화 2: 쓰로틀링 - 같은 종목 0.5초 내 재체크 방지
+            # 최적화 2: 쓰로틀링 - 같은 종목 0.5초 내 재체크 방지 (매도 전용)
             now = datetime.now()
-            last_check = self._last_signal_check.get(stock_code)
+            last_check = self._last_sell_signal_check.get(stock_code)
             if last_check:
                 elapsed = (now - last_check).total_seconds()
                 if elapsed < self._signal_check_interval:
                     return
-            self._last_signal_check[stock_code] = now
+            self._last_sell_signal_check[stock_code] = now
 
             # Redis에서 호가 데이터 가져오기
             asking_price_data = await self._get_asking_price_from_redis(stock_code)
@@ -302,13 +304,14 @@ class SignalExecutor:
         except Exception as e:
             logger.error(f"매도 시그널 체크 오류: {e}", exc_info=True)
 
-    async def handle_signal(self, user_strategy_id: int, signal: SignalResult) -> None:
+    async def handle_signal(self, user_strategy_id: int, signal: SignalResult, stock_name: str = "") -> None:
         """
         생성된 시그널 처리
 
         Args:
             user_strategy_id: 전략 ID
             signal: 생성된 시그널
+            stock_name: 종목명 (매수 시 전달)
         """
         try:
             if signal.signal_type == "BUY":
@@ -330,7 +333,8 @@ class SignalExecutor:
                 order_result = await self._order_api.process_buy_order(
                     user_strategy_id=user_strategy_id,
                     signal=signal,
-                    order_quantity=signal.target_quantity
+                    order_quantity=signal.target_quantity,
+                    stock_name=stock_name
                 )
 
                 if order_result.get("success"):
@@ -353,7 +357,8 @@ class SignalExecutor:
                     retry_result = await self._order_api.process_buy_order(
                         user_strategy_id=user_strategy_id,
                         signal=signal,
-                        order_quantity=signal.target_quantity
+                        order_quantity=signal.target_quantity,
+                        stock_name=stock_name
                     )
 
                     if retry_result.get("success"):
