@@ -112,30 +112,32 @@ class BasePriceWebSocketClient:
 
     def _log_price_data(self, parsed_data: dict) -> None:
         """체결가 데이터 로깅"""
-        logger.info(
-            f"[{self.exchange_label} 체결가] 종목={parsed_data.get('MKSC_SHRN_ISCD')}, "
-            f"현재가={parsed_data.get('STCK_PRPR', '')}, "
-            f"시가={parsed_data.get('STCK_OPRC', '')}, "
-            f"고가={parsed_data.get('STCK_HGPR', '')}, "
-            f"저가={parsed_data.get('STCK_LWPR', '')}, "
-            f"체결량={parsed_data.get('CNTG_VOL', '')}, "
-            f"전일대비={parsed_data.get('PRDY_CTRT', '')}%, "
-            f"체결시간={parsed_data.get('STCK_CNTG_HOUR', '')}, "
-            f"시가시간={parsed_data.get('OPRC_HOUR', '')}"
-        )
+        # logger.info(
+        #     f"[{self.exchange_label} 체결가] 종목={parsed_data.get('MKSC_SHRN_ISCD')}, "
+        #     f"현재가={parsed_data.get('STCK_PRPR', '')}, "
+        #     f"시가={parsed_data.get('STCK_OPRC', '')}, "
+        #     f"고가={parsed_data.get('STCK_HGPR', '')}, "
+        #     f"저가={parsed_data.get('STCK_LWPR', '')}, "
+        #     f"체결량={parsed_data.get('CNTG_VOL', '')}, "
+        #     f"전일대비={parsed_data.get('PRDY_CTRT', '')}%, "
+        #     f"체결시간={parsed_data.get('STCK_CNTG_HOUR', '')}, "
+        #     f"시가시간={parsed_data.get('OPRC_HOUR', '')}"
+        # )
+        pass
 
     def _log_asking_price_data(self, parsed_data: dict) -> None:
         """호가 데이터 로깅"""
-        logger.info(
-            f"[{self.exchange_label} 호가] 종목={parsed_data.get('MKSC_SHRN_ISCD')}, "
-            f"매도1={parsed_data.get('ASKP1', '')}, "
-            f"매수1={parsed_data.get('BIDP1', '')}, "
-            f"매도잔량1={parsed_data.get('ASKP_RSQN1', '')}, "
-            f"매수잔량1={parsed_data.get('BIDP_RSQN1', '')}, "
-            f"총매도잔량={parsed_data.get('TOTAL_ASKP_RSQN', '')}, "
-            f"총매수잔량={parsed_data.get('TOTAL_BIDP_RSQN', '')}, "
-            f"시간={parsed_data.get('BSOP_HOUR', '')}"
-        )
+        # logger.info(
+        #     f"[{self.exchange_label} 호가] 종목={parsed_data.get('MKSC_SHRN_ISCD')}, "
+        #     f"매도1={parsed_data.get('ASKP1', '')}, "
+        #     f"매수1={parsed_data.get('BIDP1', '')}, "
+        #     f"매도잔량1={parsed_data.get('ASKP_RSQN1', '')}, "
+        #     f"매수잔량1={parsed_data.get('BIDP_RSQN1', '')}, "
+        #     f"총매도잔량={parsed_data.get('TOTAL_ASKP_RSQN', '')}, "
+        #     f"총매수잔량={parsed_data.get('TOTAL_BIDP_RSQN', '')}, "
+        #     f"시간={parsed_data.get('BSOP_HOUR', '')}"
+        # )
+        pass
 
     # ------------------------------------------------------------------
     # 연결 / 재연결
@@ -379,8 +381,8 @@ class BasePriceWebSocketClient:
                 self._last_activity_time = last_message_time
 
                 # 주기적으로 메시지 수신 상태 로깅 (100개마다)
-                if message_count % 100 == 0:
-                    logger.info(f"WebSocket 메시지 수신 중... (총 {message_count}개 메시지 수신)")
+                # if message_count % 100 == 0:
+                #     logger.info(f"WebSocket 메시지 수신 중... (총 {message_count}개 메시지 수신)")
 
                 try:
                     await self._handle_message(message)
@@ -522,12 +524,12 @@ class BasePriceWebSocketClient:
                         n = len(columns)
 
                         # 컬럼 수 진단 로그 (첫 메시지만)
-                        if not hasattr(self, f'_logged_{tr_id}_count'):
-                            logger.warning(
-                                f"[{tr_id}] 첫 메시지 필드 수: {len(fields)}, "
-                                f"기대 컬럼 수: {n}"
-                            )
-                            setattr(self, f'_logged_{tr_id}_count', True)
+                        # if not hasattr(self, f'_logged_{tr_id}_count'):
+                        #     logger.warning(
+                        #         f"[{tr_id}] 첫 메시지 필드 수: {len(fields)}, "
+                        #         f"기대 컬럼 수: {n}"
+                        #     )
+                        #     setattr(self, f'_logged_{tr_id}_count', True)
 
                         lines = []
                         for i in range(0, len(fields), n):
@@ -574,12 +576,12 @@ class BasePriceWebSocketClient:
                         n = len(columns)
 
                         # 컬럼 수 진단 로그 (첫 메시지만)
-                        if not hasattr(self, f'_logged_{tr_id}_count'):
-                            logger.warning(
-                                f"[{tr_id}] 첫 메시지 필드 수: {len(fields)}, "
-                                f"기대 컬럼 수: {n}"
-                            )
-                            setattr(self, f'_logged_{tr_id}_count', True)
+                        # if not hasattr(self, f'_logged_{tr_id}_count'):
+                        #     logger.warning(
+                        #         f"[{tr_id}] 첫 메시지 필드 수: {len(fields)}, "
+                        #         f"기대 컬럼 수: {n}"
+                        #     )
+                        #     setattr(self, f'_logged_{tr_id}_count', True)
 
                         lines = []
                         for i in range(0, len(fields), n):
