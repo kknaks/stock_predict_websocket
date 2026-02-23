@@ -8,6 +8,7 @@ import json
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any
+from zoneinfo import ZoneInfo
 
 from aiokafka import AIOKafkaProducer
 from aiokafka.errors import KafkaConnectionError
@@ -82,7 +83,7 @@ class OrderSignalProducer:
         try:
             # 메시지 구성
             message = {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(ZoneInfo("Asia/Seoul")).isoformat(),
                 "user_strategy_id": user_strategy_id,
                 "signal_type": signal.signal_type,
                 "stock_code": signal.stock_code,

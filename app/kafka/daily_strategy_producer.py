@@ -7,6 +7,7 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional
 from collections import defaultdict
+from zoneinfo import ZoneInfo
 
 from aiokafka import AIOKafkaProducer
 from aiokafka.errors import KafkaConnectionError
@@ -92,7 +93,7 @@ class DailyStrategyProducer:
 
             # 메시지 구성
             message = {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(ZoneInfo("Asia/Seoul")).isoformat(),
                 "strategies_by_user": [
                     {
                         "user_id": user_id,
